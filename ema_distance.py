@@ -384,23 +384,19 @@ class TelegramReporter:
         self.chat_id = chat_id
 
     def _escape_md_v2(self, text):
-        # Escape all special characters required by MarkdownV2
         escape_chars = r'_*[]()~`>#+-=|{}.!'
         return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
     def format_section(self, timeframe, position, df):
-        header = f"*{self._escape_md_v2(timeframe)} - {self._escape_md_v2(position)} EMA34*\n"
+        header = f"*{self._escape_md_v2(timeframe)} - {self._escape_md_v2(position)} EMA34*"
         lines = [header, "```"]
-        # Header row with fixed-width columns
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
-        lines.append("\\-" * 40)
-
+        lines.append("-" * 40)
         for _, row in df.iterrows():
-            symbol = self._escape_md_v2(str(row['Symbol']))
-            dist = self._escape_md_v2(str(row['Distance (%)']))
-            daily = self._escape_md_v2(str(row['Daily Movement (%)']))
+            symbol = str(row['Symbol'])
+            dist = str(row['Distance (%)'])
+            daily = str(row['Daily Movement (%)'])
             lines.append(f"{symbol:<12} {dist:>12} {daily:>14}")
-
         lines.append("```")
         return "\n".join(lines)
 
