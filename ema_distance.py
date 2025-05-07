@@ -358,16 +358,32 @@ class BinanceClient:
         raise RuntimeError(f"Failed to fetch OHLCV for {symbol} ({market}) {interval}")
 
     def fetch_24h_changes(self):
-        url = 'https://api.binance.com/api/v3/ticker/24hr'
-        try:
-            proxies = self._get_proxy_dict()
-            resp = requests.get(url, proxies=proxies, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            return {item['symbol']: float(item['priceChangePercent']) for item in data}
-        except Exception as e:
-            logging.error(f"Failed to fetch 24h changes: {e}")
-            return {}
+        spot_url = 'https://api.binance.com/api/v3/ticker/24hr'
+        futures_url = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
+        combined_changes = {}
+
+        # Helper to fetch and parse data from a URL
+        def fetch_changes(url):
+            try:
+                proxies = self._get_proxy_dict()
+                resp = requests.get(url, proxies=proxies, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                return {item['symbol']: float(item['priceChangePercent']) for item in data}
+            except Exception as e:
+                logging.error(f"Failed to fetch 24h changes from {url}: {e}")
+                return {}
+
+        # Fetch spot changes
+        spot_changes = fetch_changes(spot_url)
+        combined_changes.update(spot_changes)
+
+        # Fetch futures changes (overwrites spot if same symbol)
+        futures_changes = fetch_changes(futures_url)
+        combined_changes.update(futures_changes)
+
+        return combined_changes
+
 
 # --- EMA distance calculation ---
 
@@ -493,7 +509,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         msg_above = reporter.format_section(tf, "Above", above)
         msg_below = reporter.format_section(tf, "Below", below)
 
-        full_msg = f"{msg_above}\n\n{msg_below}\n\n" + ("\\-" * 30)
+        full_msg = f"{msg_above}\n\n{msg_below}\n\n" + ("-"*30)
         try:
             await reporter.send_report(full_msg)
             logging.info(f"Sent Telegram report for timeframe {tf}")
