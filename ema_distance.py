@@ -471,7 +471,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         logging.info(f"Scanning timeframe {tf}")
         results = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             # Submit fetch_ohlcv calls with market info
             futures = {
                 executor.submit(
