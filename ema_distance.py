@@ -319,7 +319,7 @@ class BinanceClient:
         logging.error("All retries failed to fetch spot symbols")
         return []
 
-    def fetch_ohlcv_with_market(self, market, symbol, interval, limit=100):
+    def fetch_ohlcv(self, symbol, interval, limit=100, market="spot"):
         if market == "spot":
             url = 'https://api.binance.com/api/v3/klines'
         elif market == "perp":
