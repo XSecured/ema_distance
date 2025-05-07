@@ -162,6 +162,16 @@ class ProxyPool:
             else:
                 logging.warning("Could not determine fastest proxy.")
 
+    def refresh_proxies(self):
+        logging.info("Refreshing proxy pool because all proxies failed...")
+        proxy_url = os.getenv("PROXY_LIST_URL")
+        if proxy_url:
+            self.populate_from_url(proxy_url)
+        else:
+            self.populate_to_max()
+        # Optional delay to avoid hammering the proxy source
+        time.sleep(5)
+
     def populate_to_max(self):
         with self.lock:
             needed = self.max_pool_size - len(self.proxies)
@@ -312,23 +322,33 @@ class BinanceClient:
     def fetch_ohlcv(self, symbol, interval, limit=100):
         url = 'https://api.binance.com/api/v3/klines'
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-        for attempt in range(1, self.max_retries + 1):
+        attempt = 1
+        while attempt <= self.max_retries:
             try:
                 proxies = self._get_proxy_dict()
                 resp = requests.get(url, params=params, proxies=proxies, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
                 df = pd.DataFrame(data, columns=[
-                    'openTime','open','high','low','close','volume',
-                    'closeTime','quoteAssetVolume','numberOfTrades',
-                    'takerBuyBaseAssetVolume','takerBuyQuoteAssetVolume','ignore'
+                'openTime','open','high','low','close','volume',
+                'closeTime','quoteAssetVolume','numberOfTrades',
+                'takerBuyBaseAssetVolume','takerBuyQuoteAssetVolume','ignore'
                 ])
                 df[['high','low','close']] = df[['high','low','close']].astype(float)
                 return df
+            except RuntimeError as e:
+                if "No working proxies available" in str(e):
+                    logging.warning("All proxies failed, refreshing proxy pool and retrying...")
+                    self.proxy_pool.refresh_proxies()
+                    # Do not increment attempt here, retry immediately
+                    continue
+                else:
+                    raise
             except Exception as e:
                 logging.warning(f"Attempt {attempt} failed fetching OHLCV for {symbol} {interval}: {e}")
                 self.proxy_pool.mark_proxy_failure(proxies.get('http'))
             time.sleep(self.retry_delay * attempt + random.uniform(0, 1))
+            attempt += 1
         logging.error(f"All retries failed fetching OHLCV for {symbol} {interval}")
         raise RuntimeError(f"Failed to fetch OHLCV for {symbol} {interval}")
 
