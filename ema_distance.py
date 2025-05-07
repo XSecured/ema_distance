@@ -9,6 +9,7 @@ import os
 import asyncio
 from telegram import Bot
 import random
+import tqdm
 # --- Proxy helper functions ---
 
 def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
@@ -243,7 +244,7 @@ class BinanceClient:
         return {"http": proxy, "https": proxy}
 
     def get_perp_symbols(self):
-        logging.info("Fetching perpetual futures symbols...")
+        logging.info("Fetching perpetual futures symbols (USDT pairs only)...")
         url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
         for attempt in range(1, self.max_retries + 1):
             proxy = self.proxy_pool.get_next_proxy()
@@ -256,22 +257,26 @@ class BinanceClient:
                 resp = requests.get(url, proxies=proxies, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
-                symbols = [s['symbol'] for s in data['symbols'] 
-                           if s.get('contractType') == 'PERPETUAL' and s['status'] == 'TRADING']
+                symbols = [
+                    s['symbol'] for s in data['symbols']
+                    if s.get('contractType') == 'PERPETUAL' and
+                       s['status'] == 'TRADING' and
+                       s.get('quoteAsset') == 'USDT'
+                ]
                 if symbols:
-                    logging.info(f"Fetched {len(symbols)} perp symbols successfully.")
+                    logging.info(f"Fetched {len(symbols)} perp USDT symbols successfully.")
                     return symbols
                 else:
-                    logging.warning(f"Attempt {attempt}: No perp symbols returned, retrying...")
+                    logging.warning(f"Attempt {attempt}: No perp USDT symbols returned, retrying...")
             except requests.exceptions.RequestException as e:
                 logging.warning(f"Attempt {attempt} failed with proxy {proxy}: {e}")
                 self.proxy_pool.mark_proxy_failure(proxy)
-            time.sleep(self.retry_delay * attempt + random.uniform(0, 1))  # Exponential backoff with jitter
+            time.sleep(self.retry_delay * attempt + random.uniform(0, 1))
         logging.error("All retries failed to fetch perp symbols")
         return []
 
     def get_spot_symbols(self):
-        logging.info("Fetching spot symbols...")
+        logging.info("Fetching spot symbols (USDT pairs only)...")
         url = 'https://api.binance.com/api/v3/exchangeInfo'
         params = {'showPermissionSets': 'true'}
         for attempt in range(1, self.max_retries + 1):
@@ -283,19 +288,19 @@ class BinanceClient:
                 resp.raise_for_status()
                 data = resp.json()
 
-                # Flatten permissionSets and check for "SPOT"
                 spot_symbols = [
                     s['symbol']
                     for s in data['symbols']
                     if s['status'] == 'TRADING' and
+                       s.get('quoteAsset') == 'USDT' and
                        any('SPOT' in perm for perm in itertools.chain.from_iterable(s.get('permissionSets', [])))
                 ]
 
                 if spot_symbols:
-                    logging.info(f"Fetched {len(spot_symbols)} spot symbols successfully.")
+                    logging.info(f"Fetched {len(spot_symbols)} spot USDT symbols successfully.")
                     return spot_symbols
                 else:
-                    logging.warning(f"Attempt {attempt}: No spot symbols returned, retrying...")
+                    logging.warning(f"Attempt {attempt}: No spot USDT symbols returned, retrying...")
             except Exception as e:
                 logging.warning(f"Attempt {attempt} failed to fetch spot symbols: {e}")
             time.sleep(self.retry_delay * attempt + random.uniform(0, 1))
@@ -377,13 +382,11 @@ def build_top_sections(df, daily_changes):
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
-    # Fetch perps first
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
         logging.error("No perp symbols fetched, aborting scan.")
         return
 
-    # Then fetch spot symbols
     spot_symbols = set(binance_client.get_spot_symbols())
     if not spot_symbols:
         logging.error("No spot symbols fetched, aborting scan.")
@@ -404,7 +407,9 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(binance_client.fetch_ohlcv, sym, tf): sym for sym in symbols_to_process}
-            for future in concurrent.futures.as_completed(futures):
+
+            # Wrap futures with tqdm progress bar
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Fetching OHLCV {tf}"):
                 sym = futures[future]
                 try:
                     df = future.result()
