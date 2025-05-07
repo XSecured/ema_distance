@@ -243,6 +243,7 @@ class BinanceClient:
         return {"http": proxy, "https": proxy}
 
     def get_perp_symbols(self):
+        logging.info("Fetching perpetual futures symbols...")
         url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
         for attempt in range(1, self.max_retries + 1):
             proxy = self.proxy_pool.get_next_proxy()
@@ -258,6 +259,7 @@ class BinanceClient:
                 symbols = [s['symbol'] for s in data['symbols'] 
                            if s.get('contractType') == 'PERPETUAL' and s['status'] == 'TRADING']
                 if symbols:
+                    logging.info(f"Fetched {len(symbols)} perp symbols successfully.")
                     return symbols
                 else:
                     logging.warning(f"Attempt {attempt}: No perp symbols returned, retrying...")
@@ -269,18 +271,28 @@ class BinanceClient:
         return []
 
     def get_spot_symbols(self):
+        logging.info("Fetching spot symbols...")
         url = 'https://api.binance.com/api/v3/exchangeInfo'
+        params = {'showPermissionSets': 'true'}
         for attempt in range(1, self.max_retries + 1):
             try:
                 proxies = self._get_proxy_dict()
-                resp = requests.get(url, proxies=proxies, timeout=10)
+                resp = requests.get(url, params=params, proxies=proxies, timeout=10)
                 logging.info(f"Spot symbols fetch attempt {attempt} status: {resp.status_code}")
-                logging.info(f"Spot symbols fetch attempt {attempt} response: {resp.text[:500]}")  # first 500 chars
+                logging.debug(f"Spot symbols fetch attempt {attempt} response: {resp.text[:500]}")  # first 500 chars
                 resp.raise_for_status()
                 data = resp.json()
-                spot_symbols = [s['symbol'] for s in data['symbols'] 
-                                if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
+
+                # Flatten permissionSets and check for "SPOT"
+                spot_symbols = [
+                    s['symbol']
+                    for s in data['symbols']
+                    if s['status'] == 'TRADING' and
+                       any('SPOT' in perm for perm in itertools.chain.from_iterable(s.get('permissionSets', [])))
+                ]
+
                 if spot_symbols:
+                    logging.info(f"Fetched {len(spot_symbols)} spot symbols successfully.")
                     return spot_symbols
                 else:
                     logging.warning(f"Attempt {attempt}: No spot symbols returned, retrying...")
