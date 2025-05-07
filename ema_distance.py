@@ -265,7 +265,8 @@ class BinanceClient:
         return spot_symbols
 
     def get_perp_symbols(self):
-        url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
+    url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
+    try:
         proxies = self._get_proxy_dict()
         resp = requests.get(url, proxies=proxies, timeout=10)
         resp.raise_for_status()
@@ -273,6 +274,9 @@ class BinanceClient:
         perp_symbols = [s['symbol'] for s in data['symbols'] 
                         if s.get('contractType') == 'PERPETUAL' and s['status'] == 'TRADING']
         return perp_symbols
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Failed to fetch perp symbols: {e}")
+        return []
 
     def fetch_ohlcv(self, symbol, interval, limit=100):
         url = 'https://api.binance.com/api/v3/klines'
