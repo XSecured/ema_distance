@@ -393,7 +393,7 @@ class TelegramReporter:
         lines = [header, "```"]
         # Header row with fixed-width columns
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
-        lines.append("-" * 40)
+        lines.append("\\-" * 40)
 
         for _, row in df.iterrows():
             symbol = self._escape_md_v2(str(row['Symbol']))
