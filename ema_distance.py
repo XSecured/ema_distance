@@ -439,25 +439,9 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         logging.error("No spot symbols fetched, aborting scan.")
         return
 
-    # Separate symbols by market presence
-    spot_only = spot_symbols - perp_symbols
-    perp_only = perp_symbols - spot_symbols
-    both = perp_symbols & spot_symbols
-
-    # Build list of (market, symbol) tuples to scan
-    symbols_to_process = []
-
-    # Symbols only on spot market
-    symbols_to_process.extend([("spot", sym) for sym in spot_only])
-
-    # Symbols only on perp market
-    symbols_to_process.extend([("perp", sym) for sym in perp_only])
-
-    # Symbols on both markets: scan both
-    symbols_to_process.extend([("spot", sym) for sym in both])
-    symbols_to_process.extend([("perp", sym) for sym in both])
-
-    logging.info(f"Processing {len(symbols_to_process)} symbols (spot/perp combined)")
+    # Combine: all perp symbols + spot symbols that are not in perps
+    symbols_to_process = list(perp_symbols.union(spot_symbols - perp_symbols))
+    logging.info(f"Processing {len(symbols_to_process)} symbols (perps + spot-only)")
 
     if not symbols_to_process:
         logging.warning("No symbols to process, skipping scan.")
@@ -472,26 +456,28 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         results = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
-            # Submit fetch_ohlcv calls with market info
-            futures = {
-                executor.submit(
-                    binance_client.fetch_ohlcv_with_market, market, sym, tf
-                ): (market, sym) for market, sym in symbols_to_process
-            }
+            futures = {}
+            for sym in symbols_to_process:
+                if sym in perp_symbols:
+                    # Use perp endpoint
+                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, market="perp")] = sym
+                else:
+                    # Use spot endpoint
+                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, market="spot")] = sym
 
+            # Process futures
             for future in tqdm.tqdm(
                 concurrent.futures.as_completed(futures),
                 total=len(futures),
                 desc=f"Fetching OHLCV {tf}"
             ):
-                market, sym = futures[future]
+                sym = futures[future]
                 try:
                     df = future.result()
                     pct_dist = calculate_pct_distance(df)
-                    # Save market info with symbol for clarity if needed
-                    results.append((f"{sym} ({market})", pct_dist))
+                    results.append((sym, pct_dist))
                 except Exception as e:
-                    logging.warning(f"Failed fetching {sym} ({market}) {tf}: {e}")
+                    logging.warning(f"Failed fetching {sym} {tf}: {e}")
 
         if not results:
             logging.warning(f"No OHLCV data fetched for timeframe {tf}, skipping Telegram message.")
