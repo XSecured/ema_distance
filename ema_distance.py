@@ -274,6 +274,8 @@ class BinanceClient:
             try:
                 proxies = self._get_proxy_dict()
                 resp = requests.get(url, proxies=proxies, timeout=10)
+                logging.info(f"Spot symbols fetch attempt {attempt} status: {resp.status_code}")
+                logging.info(f"Spot symbols fetch attempt {attempt} response: {resp.text[:500]}")  # first 500 chars
                 resp.raise_for_status()
                 data = resp.json()
                 spot_symbols = [s['symbol'] for s in data['symbols'] 
