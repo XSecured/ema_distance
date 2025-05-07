@@ -8,7 +8,7 @@ import logging
 import os
 import asyncio
 from telegram import Bot
-
+import random
 # --- Proxy helper functions ---
 
 def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
@@ -231,8 +231,10 @@ class ProxyPool:
 # --- Binance Client with proxy support ---
 
 class BinanceClient:
-    def __init__(self, proxy_pool: ProxyPool):
+    def __init__(self, proxy_pool: ProxyPool, max_retries=5, retry_delay=2):
         self.proxy_pool = proxy_pool
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     def _get_proxy_dict(self):
         proxy = self.proxy_pool.get_next_proxy()
@@ -240,54 +242,74 @@ class BinanceClient:
             raise RuntimeError("No working proxies available")
         return {"http": proxy, "https": proxy}
 
-    def get_spot_symbols(self):
-        url = 'https://api.binance.com/api/v3/exchangeInfo'
-        try:
-            proxies = self._get_proxy_dict()
-            resp = requests.get(url, proxies=proxies, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            spot_symbols = [s['symbol'] for s in data['symbols'] 
-                            if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
-            return spot_symbols
-        except Exception as e:
-            logging.error(f"Failed to fetch spot symbols: {e}")
-            return []
-
-    def get_perp_symbols(self, retries=3):
+    def get_perp_symbols(self):
         url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
-        for attempt in range(retries):
+        for attempt in range(1, self.max_retries + 1):
             proxy = self.proxy_pool.get_next_proxy()
             if proxy is None:
                 logging.error("No proxies available to fetch perp symbols")
-                return []
+                time.sleep(self.retry_delay)
+                continue
             proxies = {"http": proxy, "https": proxy}
             try:
                 resp = requests.get(url, proxies=proxies, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
-                return [s['symbol'] for s in data['symbols'] 
-                        if s.get('contractType') == 'PERPETUAL' and s['status'] == 'TRADING']
+                symbols = [s['symbol'] for s in data['symbols'] 
+                           if s.get('contractType') == 'PERPETUAL' and s['status'] == 'TRADING']
+                if symbols:
+                    return symbols
+                else:
+                    logging.warning(f"Attempt {attempt}: No perp symbols returned, retrying...")
             except requests.exceptions.RequestException as e:
-                logging.warning(f"Attempt {attempt+1} failed with proxy {proxy}: {e}")
+                logging.warning(f"Attempt {attempt} failed with proxy {proxy}: {e}")
                 self.proxy_pool.mark_proxy_failure(proxy)
+            time.sleep(self.retry_delay * attempt + random.uniform(0, 1))  # Exponential backoff with jitter
         logging.error("All retries failed to fetch perp symbols")
+        return []
+
+    def get_spot_symbols(self):
+        url = 'https://api.binance.com/api/v3/exchangeInfo'
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                proxies = self._get_proxy_dict()
+                resp = requests.get(url, proxies=proxies, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                spot_symbols = [s['symbol'] for s in data['symbols'] 
+                                if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
+                if spot_symbols:
+                    return spot_symbols
+                else:
+                    logging.warning(f"Attempt {attempt}: No spot symbols returned, retrying...")
+            except Exception as e:
+                logging.warning(f"Attempt {attempt} failed to fetch spot symbols: {e}")
+            time.sleep(self.retry_delay * attempt + random.uniform(0, 1))
+        logging.error("All retries failed to fetch spot symbols")
         return []
 
     def fetch_ohlcv(self, symbol, interval, limit=100):
         url = 'https://api.binance.com/api/v3/klines'
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-        proxies = self._get_proxy_dict()
-        resp = requests.get(url, params=params, proxies=proxies, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        df = pd.DataFrame(data, columns=[
-            'openTime','open','high','low','close','volume',
-            'closeTime','quoteAssetVolume','numberOfTrades',
-            'takerBuyBaseAssetVolume','takerBuyQuoteAssetVolume','ignore'
-        ])
-        df[['high','low','close']] = df[['high','low','close']].astype(float)
-        return df
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                proxies = self._get_proxy_dict()
+                resp = requests.get(url, params=params, proxies=proxies, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                df = pd.DataFrame(data, columns=[
+                    'openTime','open','high','low','close','volume',
+                    'closeTime','quoteAssetVolume','numberOfTrades',
+                    'takerBuyBaseAssetVolume','takerBuyQuoteAssetVolume','ignore'
+                ])
+                df[['high','low','close']] = df[['high','low','close']].astype(float)
+                return df
+            except Exception as e:
+                logging.warning(f"Attempt {attempt} failed fetching OHLCV for {symbol} {interval}: {e}")
+                self.proxy_pool.mark_proxy_failure(proxies.get('http'))
+            time.sleep(self.retry_delay * attempt + random.uniform(0, 1))
+        logging.error(f"All retries failed fetching OHLCV for {symbol} {interval}")
+        raise RuntimeError(f"Failed to fetch OHLCV for {symbol} {interval}")
 
     def fetch_24h_changes(self):
         url = 'https://api.binance.com/api/v3/ticker/24hr'
@@ -341,8 +363,18 @@ def build_top_sections(df, daily_changes):
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
+    # Fetch perps first
     perp_symbols = set(binance_client.get_perp_symbols())
+    if not perp_symbols:
+        logging.error("No perp symbols fetched, aborting scan.")
+        return
+
+    # Then fetch spot symbols
     spot_symbols = set(binance_client.get_spot_symbols())
+    if not spot_symbols:
+        logging.error("No spot symbols fetched, aborting scan.")
+        return
+
     symbols_to_process = list(spot_symbols - perp_symbols)
     logging.info(f"Processing {len(symbols_to_process)} spot symbols excluding perps")
 
@@ -365,7 +397,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     pct_dist = calculate_pct_distance(df)
                     results.append((sym, pct_dist))
                 except Exception as e:
-                    logging.debug(f"Failed fetching {sym} {tf}: {e}")
+                    logging.warning(f"Failed fetching {sym} {tf}: {e}")
 
         if not results:
             logging.warning(f"No OHLCV data fetched for timeframe {tf}, skipping Telegram message.")
