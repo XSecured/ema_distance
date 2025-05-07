@@ -10,6 +10,8 @@ import asyncio
 from telegram import Bot
 import random
 import tqdm
+import re
+
 # --- Proxy helper functions ---
 
 def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
@@ -356,16 +358,34 @@ class TelegramReporter:
         self.bot = Bot(token=token)
         self.chat_id = chat_id
 
+    def _escape_md_v2(self, text):
+        # Escape all special characters required by MarkdownV2
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
     def format_section(self, timeframe, position, df):
-        header = f"*{timeframe} - {position} EMA34*"
-        lines = [header]
+        header = f"*{self._escape_md_v2(timeframe)} - {self._escape_md_v2(position)} EMA34*\n"
+        lines = [header, "```
+        # Header row with fixed-width columns
+        lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
+        lines.append("-" * 40)
+
         for _, row in df.iterrows():
-            lines.append(f"`{row['Symbol']:10} {row['Distance (%)']:>7}%  {row['Daily Movement (%)']:>7}`")
+            symbol = self._escape_md_v2(str(row['Symbol']))
+            dist = self._escape_md_v2(str(row['Distance (%)']))
+            daily = self._escape_md_v2(str(row['Daily Movement (%)']))
+            lines.append(f"{symbol:<12} {dist:>12} {daily:>14}")
+
+        lines.append("```")
         return "\n".join(lines)
 
     async def send_report(self, message):
-        await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode='Markdown')
-
+        await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=message,
+            parse_mode='MarkdownV2'
+        )
+        
 # --- Build top 40 above/below sections ---
 
 def build_top_sections(df, daily_changes):
