@@ -509,7 +509,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         msg_above = reporter.format_section(tf, "Above", above)
         msg_below = reporter.format_section(tf, "Below", below)
 
-        full_msg = f"{msg_above}\n\n{msg_below}\n\n" + ("-"*30)
+        full_msg = f"{msg_above}\n\n{msg_below}\n\n"# + ("-"*30)
         try:
             await reporter.send_report(full_msg)
             logging.info(f"Sent Telegram report for timeframe {tf}")
