@@ -29,7 +29,7 @@ def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
         logging.error("Error fetching proxies from URL %s: %s", url, e)
     return proxies
 
-def test_proxy(proxy: str, timeout=2) -> bool:
+def test_proxy(proxy: str, timeout=5) -> bool:
     test_url = "https://api.binance.com/api/v3/time"
     try:
         response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=timeout)
@@ -264,19 +264,26 @@ class BinanceClient:
                         if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
         return spot_symbols
 
-    def get_perp_symbols(self):
-    url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
-    try:
-        proxies = self._get_proxy_dict()
-        resp = requests.get(url, proxies=proxies, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        perp_symbols = [s['symbol'] for s in data['symbols'] 
+    def get_perp_symbols(self, retries=3):
+        url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
+        for attempt in range(retries):
+            proxy = self.proxy_pool.get_next_proxy()
+            if proxy is None:
+                logging.error("No proxies available to fetch perp symbols")
+                return []
+            proxies = {"http": proxy, "https": proxy}
+            try:
+                resp = requests.get(url, proxies=proxies, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                return [s['symbol'] for s in data['symbols'] 
                         if s.get('contractType') == 'PERPETUAL' and s['status'] == 'TRADING']
-        return perp_symbols
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"Failed to fetch perp symbols: {e}")
+            except requests.exceptions.RequestException as e:
+                logging.warning(f"Attempt {attempt+1} failed with proxy {proxy}: {e}")
+                self.proxy_pool.mark_proxy_failure(proxy)
+        logging.error("All retries failed to fetch perp symbols")
         return []
+
 
     def fetch_ohlcv(self, symbol, interval, limit=100):
         url = 'https://api.binance.com/api/v3/klines'
