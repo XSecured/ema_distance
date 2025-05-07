@@ -365,7 +365,7 @@ class TelegramReporter:
 
     def format_section(self, timeframe, position, df):
         header = f"*{self._escape_md_v2(timeframe)} - {self._escape_md_v2(position)} EMA34*\n"
-        lines = [header, "```
+        lines = [header, "```"
         # Header row with fixed-width columns
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
@@ -402,25 +402,30 @@ def build_top_sections(df, daily_changes):
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
+    # Fetch perp symbols (USDT pairs)
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
         logging.error("No perp symbols fetched, aborting scan.")
         return
 
+    # Fetch spot symbols (USDT pairs)
     spot_symbols = set(binance_client.get_spot_symbols())
     if not spot_symbols:
         logging.error("No spot symbols fetched, aborting scan.")
         return
 
-    symbols_to_process = list(spot_symbols - perp_symbols)
-    logging.info(f"Processing {len(symbols_to_process)} spot symbols excluding perps")
+    # Combine: all perp symbols + spot symbols that are not in perps
+    symbols_to_process = list(perp_symbols.union(spot_symbols - perp_symbols))
+    logging.info(f"Processing {len(symbols_to_process)} symbols (perps + spot-only)")
 
     if not symbols_to_process:
         logging.warning("No symbols to process, skipping scan.")
         return
 
+    # Fetch 24h changes once
     daily_changes = binance_client.fetch_24h_changes()
 
+    # Scan each timeframe
     for tf in ['5m', '15m', '30m', '1h', '4h', '1d', '1w']:
         logging.info(f"Scanning timeframe {tf}")
         results = []
@@ -428,8 +433,10 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(binance_client.fetch_ohlcv, sym, tf): sym for sym in symbols_to_process}
 
-            # Wrap futures with tqdm progress bar
-            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Fetching OHLCV {tf}"):
+            # Progress bar for scanning symbols
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures),
+                                    total=len(futures),
+                                    desc=f"Fetching OHLCV {tf}"):
                 sym = futures[future]
                 try:
                     df = future.result()
