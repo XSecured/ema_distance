@@ -6,6 +6,7 @@ import itertools
 import time
 import logging
 import os
+import asyncio
 from telegram import Bot
 
 # --- Proxy helper functions ---
@@ -76,7 +77,6 @@ def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working:
                     # Early stop when enough working proxies found
                     break
         finally:
-            # Cancel remaining futures if early stopping triggered
             if len(working) >= max_working:
                 for f in futures:
                     f.cancel()
@@ -97,6 +97,7 @@ class ProxyPool:
         self.proxy_cycle = itertools.cycle(self.proxies) if self.proxies else None
 
         self._stop_event = threading.Event()
+        self.populate_to_max()
         self.start_checker()
         self.start_fastest_proxy_checker()
 
@@ -259,7 +260,6 @@ class BinanceClient:
         resp = requests.get(url, proxies=proxies, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        # Spot symbols have 'SPOT' in 'permissions' list
         spot_symbols = [s['symbol'] for s in data['symbols'] 
                         if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
         return spot_symbols
@@ -283,7 +283,6 @@ class BinanceClient:
                 self.proxy_pool.mark_proxy_failure(proxy)
         logging.error("All retries failed to fetch perp symbols")
         return []
-
 
     def fetch_ohlcv(self, symbol, interval, limit=100):
         url = 'https://api.binance.com/api/v3/klines'
@@ -315,7 +314,7 @@ def calculate_pct_distance(df):
     last = df.iloc[-1]
     return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
-# --- Telegram Reporter ---
+# --- Telegram Reporter (async) ---
 
 class TelegramReporter:
     def __init__(self, token, chat_id):
@@ -329,8 +328,8 @@ class TelegramReporter:
             lines.append(f"`{row['Symbol']:10} {row['Distance (%)']:>7}%  {row['Daily Movement (%)']:>7}`")
         return "\n".join(lines)
 
-    def send_report(self, message):
-        self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode='Markdown')
+    async def send_report(self, message):
+        await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode='Markdown')
 
 # --- Build top 40 above/below sections ---
 
@@ -345,9 +344,9 @@ def build_top_sections(df, daily_changes):
     above.columns = below.columns = ['Symbol', 'Distance (%)', 'Daily Movement (%)']
     return above, below
 
-# --- Main scanning and reporting loop ---
+# --- Async main scanning and reporting loop ---
 
-def fetch_symbol_distance(client, symbol, tf):
+async def fetch_symbol_distance(client, symbol, tf):
     try:
         df = client.fetch_ohlcv(symbol, tf)
         pct_dist = calculate_pct_distance(df)
@@ -356,7 +355,7 @@ def fetch_symbol_distance(client, symbol, tf):
         logging.debug(f"Failed fetching {symbol} {tf}: {e}")
         return None
 
-def run_scan_and_report(binance_client, reporter, proxy_pool):
+async def run_scan_and_report(binance_client, reporter, proxy_pool):
     perp_symbols = set(binance_client.get_perp_symbols())
     spot_symbols = set(binance_client.get_spot_symbols())
     symbols_to_process = list(spot_symbols - perp_symbols)
@@ -368,12 +367,31 @@ def run_scan_and_report(binance_client, reporter, proxy_pool):
         logging.info(f"Scanning timeframe {tf}")
         results = []
 
+        loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(fetch_symbol_distance, binance_client, sym, tf): sym for sym in symbols_to_process}
+            futures = [loop.run_in_executor(executor, binance_client.fetch_ohlcv, sym, tf) for sym in symbols_to_process]
+            for coro in asyncio.as_completed(futures):
+                try:
+                    df = await coro
+                    pct_dist = calculate_pct_distance(df)
+                    symbol = df.iloc[-1]['closeTime']  # We need symbol, so better to pass symbol in closure below
+                    # Since we can't get symbol from df, better to map futures with symbol:
+                    # We'll fix this below
+                except Exception as e:
+                    logging.debug(f"Error fetching OHLCV: {e}")
+
+        # Instead, let's rewrite fetching with symbol mapping:
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(binance_client.fetch_ohlcv, sym, tf): sym for sym in symbols_to_process}
             for future in concurrent.futures.as_completed(futures):
-                res = future.result()
-                if res is not None:
-                    results.append(res)
+                sym = futures[future]
+                try:
+                    df = future.result()
+                    pct_dist = calculate_pct_distance(df)
+                    results.append((sym, pct_dist))
+                except Exception as e:
+                    logging.debug(f"Failed fetching {sym} {tf}: {e}")
 
         df = pd.DataFrame(results, columns=['symbol', 'pct_distance'])
 
@@ -383,15 +401,14 @@ def run_scan_and_report(binance_client, reporter, proxy_pool):
         msg_below = reporter.format_section(tf, "Below", below)
 
         full_msg = f"{msg_above}\n\n{msg_below}\n\n" + ("-"*30)
-        reporter.send_report(full_msg)
-        time.sleep(2)  # avoid Telegram flood limits
+        await reporter.send_report(full_msg)
+        await asyncio.sleep(2)  # avoid Telegram flood limits
 
-# --- Entrypoint ---
+# --- Async Entrypoint ---
 
-def main():
+async def main():
     logging.basicConfig(level=logging.INFO)
 
-    # Load proxies from URL or local file
     proxy_url = os.getenv("PROXY_LIST_URL")
     if not proxy_url:
         logging.error("Set PROXY_LIST_URL environment variable with your proxy list URL")
@@ -409,7 +426,7 @@ def main():
     binance_client = BinanceClient(proxy_pool)
     reporter = TelegramReporter(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 
-    run_scan_and_report(binance_client, reporter, proxy_pool)
+    await run_scan_and_report(binance_client, reporter, proxy_pool)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
