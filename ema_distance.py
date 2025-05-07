@@ -29,25 +29,31 @@ def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
         logging.error("Error fetching proxies from URL %s: %s", url, e)
     return proxies
 
-def test_proxy(proxy: str) -> bool:
+def test_proxy(proxy: str, timeout=2) -> bool:
     test_url = "https://api.binance.com/api/v3/time"
     try:
-        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=3)
+        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=timeout)
         return 200 <= response.status_code < 300
+    except requests.exceptions.Timeout:
+        logging.debug(f"Proxy {proxy} timed out during connectivity test.")
+        return False
+    except requests.exceptions.ProxyError:
+        logging.debug(f"Proxy {proxy} proxy error during connectivity test.")
+        return False
     except Exception as e:
-        logging.debug("Proxy %s failed connectivity test: %s", proxy, e)
+        logging.debug(f"Proxy {proxy} failed connectivity test: {e}")
         return False
 
-def test_proxy_speed(proxy: str) -> float:
+def test_proxy_speed(proxy: str, timeout=5) -> float:
     test_url = "https://api.binance.com/api/v3/time"
     try:
         start_time = time.time()
-        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=3)
+        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=timeout)
         response.raise_for_status()
         end_time = time.time()
         return end_time - start_time
     except Exception as e:
-        logging.warning("Proxy %s failed speed test: %s", proxy, e)
+        logging.debug(f"Proxy {proxy} failed speed test: {e}")
         return float("inf")
 
 def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working: int = 20) -> list:
@@ -62,28 +68,20 @@ def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working:
                 proxy = futures[future]
                 if future.result():
                     working.append(proxy)
-                    if len(working) % 2 == 0:
-                        logging.info("Proxy check: Tested %d | Working: %d | Dead: %d", tested, len(working), tested - len(working))
+                    if len(working) % 5 == 0:
+                        logging.info(f"Proxy check: Tested {tested} | Working: {len(working)} | Dead: {tested - len(working)}")
                 else:
                     dead += 1
                 if len(working) >= max_working:
+                    # Early stop when enough working proxies found
                     break
         finally:
+            # Cancel remaining futures if early stopping triggered
             if len(working) >= max_working:
                 for f in futures:
                     f.cancel()
-    logging.info("Found %d working proxies (tested %d)", len(working), tested)
+    logging.info(f"Found {len(working)} working proxies (tested {tested})")
     return working[:max_working]
-
-def rank_proxies_by_speed(proxies: list) -> list:
-    ranked = []
-    for proxy in proxies:
-        speed = test_proxy_speed(proxy)
-        ranked.append((proxy, speed))
-    ranked.sort(key=lambda x: x[1])
-    return ranked
-
-# --- ProxyPool Class ---
 
 class ProxyPool:
     def __init__(self, proxies: list = None, max_pool_size: int = 25, proxy_check_interval: int = 600, max_failures: int = 3):
@@ -142,12 +140,36 @@ class ProxyPool:
                 self.fastest_proxy = None
                 logging.warning("No proxies available to update fastest proxy.")
                 return
-            ranked = rank_proxies_by_speed(self.proxies)
-            if ranked:
-                self.fastest_proxy = ranked[0][0]
-                logging.info(f"Fastest proxy updated: {self.fastest_proxy}")
+
+            max_workers = min(50, len(self.proxies))
+            fastest = None
+            fastest_time = float('inf')
+
+            def test_and_return(proxy):
+                try:
+                    start = time.time()
+                    resp = requests.get("https://api.binance.com/api/v3/time",
+                                        proxies={"http": proxy, "https": proxy},
+                                        timeout=5)
+                    resp.raise_for_status()
+                    return proxy, time.time() - start
+                except:
+                    return proxy, float('inf')
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(test_and_return, p): p for p in self.proxies}
+                for future in concurrent.futures.as_completed(futures):
+                    proxy, speed = future.result()
+                    if speed < fastest_time:
+                        fastest = proxy
+                        fastest_time = speed
+                    if fastest_time < 0.5:  # early stop if very fast proxy found
+                        break
+
+            self.fastest_proxy = fastest
+            if fastest:
+                logging.info(f"Fastest proxy updated: {fastest} with speed {fastest_time:.2f}s")
             else:
-                self.fastest_proxy = None
                 logging.warning("Could not determine fastest proxy.")
 
     def populate_to_max(self):
@@ -180,8 +202,8 @@ class ProxyPool:
     def check_proxies(self):
         logging.info("Running concurrent proxy health check...")
         working = test_proxies_concurrently(self.proxies,
-                                        max_workers=50,
-                                        max_working=len(self.proxies))
+                                            max_workers=50,
+                                            max_working=len(self.proxies))
         with self.lock:
             initial_count = len(self.proxies)
             self.proxies = working
@@ -196,7 +218,7 @@ class ProxyPool:
     def fastest_proxy_checker_loop(self):
         while not self._stop_event.is_set():
             self.update_fastest_proxy()
-            self._stop_event.wait(3600)  # sleep 1 hour or until stopped
+            self._stop_event.wait(3600)  # 1 hour
 
     def proxy_checker_loop(self):
         while not self._stop_event.is_set():
