@@ -45,18 +45,6 @@ def test_proxy(proxy: str, timeout=5) -> bool:
         logging.debug(f"Proxy {proxy} failed connectivity test: {e}")
         return False
 
-def test_proxy_speed(proxy: str, timeout=5) -> float:
-    test_url = "https://api.binance.com/api/v3/time"
-    try:
-        start_time = time.time()
-        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=timeout)
-        response.raise_for_status()
-        end_time = time.time()
-        return end_time - start_time
-    except Exception as e:
-        logging.debug(f"Proxy {proxy} failed speed test: {e}")
-        return float("inf")
-
 def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working: int = 20) -> list:
     working = []
     tested = 0
@@ -84,22 +72,20 @@ def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working:
     return working[:max_working]
 
 class ProxyPool:
-    def __init__(self, proxies: list = None, max_pool_size: int = 25, proxy_check_interval: int = 600, max_failures: int = 3):
+    def __init__(self, max_pool_size: int = 25, proxy_check_interval: int = 600, max_failures: int = 3):
         self.lock = threading.Lock()
         self.max_pool_size = max_pool_size
         self.proxy_check_interval = proxy_check_interval
         self.max_failures = max_failures
 
-        self.proxies = proxies.copy() if proxies else []
+        self.proxies = []
         self.proxy_failures = {}  # proxy -> failure count
         self.failed_proxies = set()
 
-        self.proxy_cycle = itertools.cycle(self.proxies) if self.proxies else None
+        self.proxy_cycle = None
+        self.fastest_proxy = None
 
         self._stop_event = threading.Event()
-        self.populate_to_max()
-        self.start_checker()
-        self.start_fastest_proxy_checker()
 
     def get_next_proxy(self):
         with self.lock:
@@ -197,7 +183,7 @@ class ProxyPool:
             self.proxies = working[:self.max_pool_size]
             self.proxy_failures.clear()
             self.failed_proxies.clear()
-            self.proxy_cycle = itertools.cycle(self.proxies)
+            self.proxy_cycle = itertools.cycle(self.proxies) if self.proxies else None
             logging.info(f"Proxy pool filled with {len(self.proxies)} proxies from URL.")
 
     def check_proxies(self):
@@ -256,13 +242,17 @@ class BinanceClient:
 
     def get_spot_symbols(self):
         url = 'https://api.binance.com/api/v3/exchangeInfo'
-        proxies = self._get_proxy_dict()
-        resp = requests.get(url, proxies=proxies, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        spot_symbols = [s['symbol'] for s in data['symbols'] 
-                        if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
-        return spot_symbols
+        try:
+            proxies = self._get_proxy_dict()
+            resp = requests.get(url, proxies=proxies, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            spot_symbols = [s['symbol'] for s in data['symbols'] 
+                            if 'SPOT' in s.get('permissions', []) and s['status'] == 'TRADING']
+            return spot_symbols
+        except Exception as e:
+            logging.error(f"Failed to fetch spot symbols: {e}")
+            return []
 
     def get_perp_symbols(self, retries=3):
         url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
@@ -301,11 +291,15 @@ class BinanceClient:
 
     def fetch_24h_changes(self):
         url = 'https://api.binance.com/api/v3/ticker/24hr'
-        proxies = self._get_proxy_dict()
-        resp = requests.get(url, proxies=proxies, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        return {item['symbol']: float(item['priceChangePercent']) for item in data}
+        try:
+            proxies = self._get_proxy_dict()
+            resp = requests.get(url, proxies=proxies, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            return {item['symbol']: float(item['priceChangePercent']) for item in data}
+        except Exception as e:
+            logging.error(f"Failed to fetch 24h changes: {e}")
+            return {}
 
 # --- EMA distance calculation ---
 
@@ -346,20 +340,15 @@ def build_top_sections(df, daily_changes):
 
 # --- Async main scanning and reporting loop ---
 
-async def fetch_symbol_distance(client, symbol, tf):
-    try:
-        df = client.fetch_ohlcv(symbol, tf)
-        pct_dist = calculate_pct_distance(df)
-        return symbol, pct_dist
-    except Exception as e:
-        logging.debug(f"Failed fetching {symbol} {tf}: {e}")
-        return None
-
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
     perp_symbols = set(binance_client.get_perp_symbols())
     spot_symbols = set(binance_client.get_spot_symbols())
     symbols_to_process = list(spot_symbols - perp_symbols)
     logging.info(f"Processing {len(symbols_to_process)} spot symbols excluding perps")
+
+    if not symbols_to_process:
+        logging.warning("No symbols to process, skipping scan.")
+        return
 
     daily_changes = binance_client.fetch_24h_changes()
 
@@ -367,21 +356,6 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         logging.info(f"Scanning timeframe {tf}")
         results = []
 
-        loop = asyncio.get_event_loop()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [loop.run_in_executor(executor, binance_client.fetch_ohlcv, sym, tf) for sym in symbols_to_process]
-            for coro in asyncio.as_completed(futures):
-                try:
-                    df = await coro
-                    pct_dist = calculate_pct_distance(df)
-                    symbol = df.iloc[-1]['closeTime']  # We need symbol, so better to pass symbol in closure below
-                    # Since we can't get symbol from df, better to map futures with symbol:
-                    # We'll fix this below
-                except Exception as e:
-                    logging.debug(f"Error fetching OHLCV: {e}")
-
-        # Instead, let's rewrite fetching with symbol mapping:
-        results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(binance_client.fetch_ohlcv, sym, tf): sym for sym in symbols_to_process}
             for future in concurrent.futures.as_completed(futures):
@@ -393,29 +367,44 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                 except Exception as e:
                     logging.debug(f"Failed fetching {sym} {tf}: {e}")
 
+        if not results:
+            logging.warning(f"No OHLCV data fetched for timeframe {tf}, skipping Telegram message.")
+            continue
+
         df = pd.DataFrame(results, columns=['symbol', 'pct_distance'])
 
         above, below = build_top_sections(df, daily_changes)
+
+        if above.empty and below.empty:
+            logging.info(f"No data to report for timeframe {tf}, skipping Telegram message.")
+            continue
 
         msg_above = reporter.format_section(tf, "Above", above)
         msg_below = reporter.format_section(tf, "Below", below)
 
         full_msg = f"{msg_above}\n\n{msg_below}\n\n" + ("-"*30)
-        await reporter.send_report(full_msg)
+        try:
+            await reporter.send_report(full_msg)
+            logging.info(f"Sent Telegram report for timeframe {tf}")
+        except Exception as e:
+            logging.error(f"Failed to send Telegram message: {e}")
+
         await asyncio.sleep(2)  # avoid Telegram flood limits
 
 # --- Async Entrypoint ---
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
     proxy_url = os.getenv("PROXY_LIST_URL")
     if not proxy_url:
         logging.error("Set PROXY_LIST_URL environment variable with your proxy list URL")
         return
 
-    proxies = fetch_proxies_from_url(proxy_url)
-    proxy_pool = ProxyPool(proxies=proxies)
+    proxy_pool = ProxyPool(max_pool_size=25)
+    proxy_pool.populate_from_url(proxy_url)
+    proxy_pool.start_checker()
+    proxy_pool.start_fastest_proxy_checker()
 
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
