@@ -2,7 +2,7 @@ name: Run Crypto Scanner Hourly
 
 on:
   schedule:
-    - cron: '0 * * * *'  # runs at minute 0 every hour UTC
+    - cron: '*/3 * * * *'  # runs at minute 0 every hour UTC
 
 jobs:
   run-script:
