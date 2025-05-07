@@ -388,7 +388,8 @@ class TelegramReporter:
         return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
     def format_section(self, timeframe, position, df):
-        header = f"*{self._escape_md_v2(timeframe)} - {self._escape_md_v2(position)} EMA34*"
+        # Escape only the header (outside code block)
+        header = f"*{self._escape_md_v2(timeframe)} \\- {self._escape_md_v2(position)} EMA34*"
         lines = [header, "```"]
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
@@ -399,6 +400,7 @@ class TelegramReporter:
             lines.append(f"{symbol:<12} {dist:>12} {daily:>14}")
         lines.append("```")
         return "\n".join(lines)
+
 
     async def send_report(self, message):
         await self.bot.send_message(
