@@ -32,7 +32,7 @@ def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
 def test_proxy(proxy: str) -> bool:
     test_url = "https://api.binance.com/api/v3/time"
     try:
-        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=10)
+        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=3)
         return 200 <= response.status_code < 300
     except Exception as e:
         logging.debug("Proxy %s failed connectivity test: %s", proxy, e)
@@ -42,7 +42,7 @@ def test_proxy_speed(proxy: str) -> float:
     test_url = "https://api.binance.com/api/v3/time"
     try:
         start_time = time.time()
-        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=10)
+        response = requests.get(test_url, proxies={"http": proxy, "https": proxy}, timeout=3)
         response.raise_for_status()
         end_time = time.time()
         return end_time - start_time
@@ -178,11 +178,14 @@ class ProxyPool:
             logging.info(f"Proxy pool filled with {len(self.proxies)} proxies from URL.")
 
     def check_proxies(self):
+        logging.info("Running concurrent proxy health check...")
+        working = test_proxies_concurrently(self.proxies,
+                                        max_workers=50,
+                                        max_working=len(self.proxies))
         with self.lock:
             initial_count = len(self.proxies)
-            alive_proxies = [p for p in self.proxies if test_proxy(p)]
-            removed = initial_count - len(alive_proxies)
-            self.proxies = alive_proxies
+            self.proxies = working
+            removed = initial_count - len(working)
             self.proxy_failures = {p: self.proxy_failures.get(p, 0) for p in self.proxies}
             self.failed_proxies = set()
             self.proxy_cycle = itertools.cycle(self.proxies) if self.proxies else None
