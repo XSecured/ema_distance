@@ -419,7 +419,7 @@ class TelegramReporter:
 
 
     async def send_report(self, message):
-        logging.info(f"Telegram message content:\n{message}")  # <-- Add this line
+        #logging.info(f"Telegram message content:\n{message}")  # <-- Add this line
         await self.bot.send_message(
             chat_id=self.chat_id,
             text=message,
