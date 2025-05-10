@@ -395,9 +395,15 @@ def calculate_pct_distance(df):
 # --- Telegram Reporter (async) ---
 
 class TelegramReporter:
-    def __init__(self, token, chat_id):
+    def __init__(self, token, chat_id, channel_username):
+        """
+        :param token: Telegram bot token
+        :param chat_id: Your personal chat ID (int)
+        :param channel_username: Channel username string starting with '@' (e.g. '@CoinsToTrade')
+        """
         self.bot = Bot(token=token)
         self.chat_id = chat_id
+        self.channel_username = @CoinsToTrade
 
     def _escape_md_v2(self, text):
         escape_chars = r'_*[]()~`>#+-=|{}.!'
@@ -422,6 +428,12 @@ class TelegramReporter:
         #logging.info(f"Telegram message content:\n{message}")  # <-- Add this line
         await self.bot.send_message(
             chat_id=self.chat_id,
+            text=message,
+            parse_mode='MarkdownV2'
+        )
+        # Send to the specified channel username
+        await self.bot.send_message(
+            chat_id=self.channel_username,
             text=message,
             parse_mode='MarkdownV2'
         )
