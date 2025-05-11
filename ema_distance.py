@@ -399,11 +399,11 @@ class TelegramReporter:
         """
         :param token: Telegram bot token
         :param chat_id: Your personal chat ID (int)
-        :param channel_username: Channel username string starting with '@' (e.g. '@CoinsToTrade')
+        :param channel_username: Channel username string starting with '@'
         """
         self.bot = Bot(token=token)
         self.chat_id = chat_id
-        self.channel_username = @CoinsToTrade
+        self.channel_username = channel_username
 
     def _escape_md_v2(self, text):
         escape_chars = r'_*[]()~`>#+-=|{}.!'
@@ -547,14 +547,22 @@ async def main():
 
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables")
+    TELEGRAM_CHANNEL_USERNAME = os.getenv("TELEGRAM_CHANNEL_USERNAME")
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or not TELEGRAM_CHANNEL_USERNAME:
+        logging.error("Set TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, and TELEGRAM_CHANNEL_USERNAME environment variables")
         return
 
     binance_client = BinanceClient(proxy_pool)
-    reporter = TelegramReporter(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
+
+    reporter = TelegramReporter(
+        token=TELEGRAM_TOKEN,
+        chat_id=int(TELEGRAM_CHAT_ID),
+        channel_username=TELEGRAM_CHANNEL_USERNAME
+    )
 
     await run_scan_and_report(binance_client, reporter, proxy_pool)
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())
