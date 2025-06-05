@@ -405,69 +405,61 @@ def calculate_pct_distance(df):
     return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
 
-# --- Enhanced EMA analysis function with volatility and trend filter ---
+# --- Enhanced EMA analysis function with relaxed trend filter and no volatility filter ---
 
-def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, min_volatility=0.5):
+def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=0.5):
     """
-    Enhanced EMA analysis with volatility filter and trend filter for upside breakouts.
+    Enhanced EMA analysis with relaxed trend filter (price can be slightly below EMA).
+    Volatility filter removed.
     """
     df = df.copy()
     df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
     df['pct_distance'] = (df['close'] - df['EMA34']) / df['EMA34'] * 100
-    
+
     recent_data = df.tail(lookback_period)
-    
+
     touches = 0
     crosses = 0
     volume_spikes = 0
-    
+
     # Calculate average volume for comparison
     avg_volume = recent_data['volume'].astype(float).mean()
-    
-    # Calculate average candle range (high - low) as volatility measure
-    recent_data['range'] = recent_data['high'] - recent_data['low']
-    avg_range = recent_data['range'].mean()
-    
-    # Volatility filter: skip if average range below threshold
-    if avg_range < min_volatility:
-        return None  # Not volatile enough
-    
-    # Trend filter: only consider if last close > EMA (upside breakout candidate)
-    if recent_data.iloc[-1]['close'] <= recent_data.iloc[-1]['EMA34']:
-        return None  # Not an upside breakout candidate
-    
+
+    # Relaxed trend filter: last close can be up to max_distance_below_ema % below EMA
+    last_distance = recent_data.iloc[-1]['pct_distance']
+    if last_distance < -max_distance_below_ema:
+        return None  # Price too far below EMA, skip
+
     for i in range(1, len(recent_data)):
         current_dist = abs(recent_data.iloc[i]['pct_distance'])
         prev_dist = recent_data.iloc[i-1]['pct_distance']
         curr_dist_signed = recent_data.iloc[i]['pct_distance']
         current_volume = float(recent_data.iloc[i]['volume'])
-        
+
         # Count touches (price close to EMA)
         if current_dist <= touch_threshold:
             touches += 1
-            
+
         # Count crosses (sign change in distance)
         if (prev_dist > 0 and curr_dist_signed < 0) or (prev_dist < 0 and curr_dist_signed > 0):
             crosses += 1
-            
+
         # Count volume spikes during EMA touches
         if current_dist <= touch_threshold and current_volume > avg_volume * 1.5:
             volume_spikes += 1
-    
-    # Breakout score excludes tight ranges now
+
     breakout_score = (
         touches * 2 +           # Base score for touches
         crosses * 3 +           # Higher weight for crosses
         volume_spikes * 2       # Volume confirmation bonus
     )
-    
+
     return {
         'touches': touches,
         'crosses': crosses,
         'volume_spikes': volume_spikes,
         'breakout_score': breakout_score,
-        'current_distance': recent_data.iloc[-1]['pct_distance'],
-        'avg_range': avg_range
+        'current_distance': last_distance
     }
 
 
@@ -506,32 +498,31 @@ class TelegramReporter:
         """Format EMA enhanced analysis section for Telegram message."""
         if df.empty:
             return ""
-            
+
         df_copy = df.copy()
         df_copy['daily'] = df_copy['symbol'].map(daily_changes)
-        
+
         df_copy['Touches'] = df_copy['touches'].astype(str)
         df_copy['Crosses'] = df_copy['crosses'].astype(str)
         df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
         df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
         df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
-        df_copy['Avg Range'] = df_copy['avg_range'].map('{:.6f}'.format)
         df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
-        
-        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Avg Range', 'Daily Move (%)']].copy()
-        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Avg Range', 'Daily Move (%)']
-        
+
+        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
+        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
+
         header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
         lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'VolSpikes':>9} {'Score':>7} {'Dist(%)':>9} {'AvgRange':>10} {'Daily':>10}")
-        lines.append("-" * 80)
-        
+        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'VolSpikes':>9} {'Score':>7} {'Dist(%)':>9} {'Daily':>10}")
+        lines.append("-" * 70)
+
         for _, row in display_df.iterrows():
             lines.append(
                 f"{row['Symbol']:<12} {row['Touches']:>7} {row['Crosses']:>7} {row['Volume Spikes']:>9} "
-                f"{row['Breakout Score']:>7} {row['Distance (%)']:>9} {row['Avg Range']:>10} {row['Daily Move (%)']:>10}"
+                f"{row['Breakout Score']:>7} {row['Distance (%)']:>9} {row['Daily Move (%)']:>10}"
             )
-        
+
         lines.append("```")
         return "\n".join(lines)
 
@@ -546,7 +537,7 @@ class TelegramReporter:
             text=message,
             parse_mode='MarkdownV2'
         )
-        
+
 
 # --- Build top 40 above/below sections ---
 
@@ -568,7 +559,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
     EMA_TOUCH_THRESHOLD = float(os.getenv("EMA_TOUCH_THRESHOLD", "0.5"))
     EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))
     MIN_TOUCHES_ALERT = int(os.getenv("MIN_TOUCHES_ALERT", "3"))
-    MIN_VOLATILITY = float(os.getenv("MIN_VOLATILITY", "0.5"))
+    MAX_DISTANCE_BELOW_EMA = float(os.getenv("MAX_DISTANCE_BELOW_EMA", "0.5"))
 
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
@@ -621,7 +612,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                             df,
                             touch_threshold=EMA_TOUCH_THRESHOLD,
                             lookback_period=EMA_LOOKBACK_PERIOD,
-                            min_volatility=MIN_VOLATILITY
+                            max_distance_below_ema=MAX_DISTANCE_BELOW_EMA
                         )
                         if analysis is None:
                             continue
@@ -632,8 +623,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                             analysis['crosses'],
                             analysis['volume_spikes'],
                             analysis['breakout_score'],
-                            analysis['current_distance'],
-                            analysis['avg_range']
+                            analysis['current_distance']
                         ))
 
                 except Exception as e:
@@ -664,7 +654,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
         if tf in ema_touch_timeframes and ema_touch_results:
             ema_touch_reports[tf] = pd.DataFrame(ema_touch_results, columns=[
-                'symbol', 'touches', 'crosses', 'volume_spikes', 'breakout_score', 'current_distance', 'avg_range'
+                'symbol', 'touches', 'crosses', 'volume_spikes', 'breakout_score', 'current_distance'
             ])
 
         await asyncio.sleep(2)
