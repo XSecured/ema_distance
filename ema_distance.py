@@ -459,7 +459,7 @@ class TelegramReporter:
     def format_section(self, timeframe, position, df):
         # Escape only the header (outside code block)
         header = f"*{self._escape_md_v2(timeframe)} • {self._escape_md_v2(position)} Line*"
-        lines = [header, "```
+        lines = [header, "```"]
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
         for _, row in df.iterrows():
