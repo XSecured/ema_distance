@@ -392,6 +392,53 @@ def calculate_pct_distance(df):
     last = df.iloc[-1]
     return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
+
+# --- NEW: EMA touch detection function ---
+
+def calculate_ema_touches(df, touch_threshold=0.5, lookback_period=20):
+    """
+    Count how many times price has touched/crossed EMA in the last N candles
+    
+    :param df: DataFrame with OHLCV data
+    :param touch_threshold: Percentage threshold to consider a "touch" (0.5% default)
+    :param lookback_period: Number of candles to look back (20 default)
+    :return: Dictionary with touch count, cross count, touch density, and current distance
+    """
+    df = df.copy()
+    df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
+    
+    # Calculate percentage distance for each candle
+    df['pct_distance'] = (df['close'] - df['EMA34']) / df['EMA34'] * 100
+    
+    # Consider last N candles
+    recent_data = df.tail(lookback_period)
+    
+    touches = 0
+    crosses = 0
+    
+    for i in range(1, len(recent_data)):
+        current_dist = abs(recent_data.iloc[i]['pct_distance'])
+        prev_dist = recent_data.iloc[i-1]['pct_distance']
+        curr_dist_signed = recent_data.iloc[i]['pct_distance']
+        
+        # Count as touch if within threshold
+        if current_dist <= touch_threshold:
+            touches += 1
+            
+        # Count crosses (sign change in distance)
+        if (prev_dist > 0 and curr_dist_signed < 0) or (prev_dist < 0 and curr_dist_signed > 0):
+            crosses += 1
+    
+    current_distance = recent_data.iloc[-1]['pct_distance']
+    
+    return {
+        'touches': touches,
+        'crosses': crosses,
+        'touch_density': touches / lookback_period * 100,  # % of candles that touched EMA
+        'current_distance': current_distance
+    }
+
+
 # --- Telegram Reporter (async) ---
 
 class TelegramReporter:
@@ -412,7 +459,7 @@ class TelegramReporter:
     def format_section(self, timeframe, position, df):
         # Escape only the header (outside code block)
         header = f"*{self._escape_md_v2(timeframe)} • {self._escape_md_v2(position)} Line*"
-        lines = [header, "```"]
+        lines = [header, "```
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
         for _, row in df.iterrows():
@@ -423,6 +470,38 @@ class TelegramReporter:
         lines.append("```")
         return "\n".join(lines)
 
+    # --- NEW: EMA touch report formatting ---
+    def format_ema_touch_section(self, timeframe, df, daily_changes):
+        """Format EMA touch analysis section for Telegram message."""
+        if df.empty:
+            return ""
+            
+        df_copy = df.copy()
+        df_copy['daily'] = df_copy['symbol'].map(daily_changes)
+        
+        df_copy['Touches'] = df_copy['touches'].astype(str)
+        df_copy['Crosses'] = df_copy['crosses'].astype(str)
+        df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
+        df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
+        
+        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Distance (%)', 'Daily Move (%)']].copy()
+        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Distance (%)', 'Daily Move (%)']
+        
+        header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
+        lines = [header, "```
+        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'Distance':>9} {'Daily':>10}")
+        lines.append("-" * 48)
+        
+        for _, row in display_df.iterrows():
+            symbol = str(row['Symbol'])
+            touches = str(row['Touches'])
+            crosses = str(row['Crosses'])
+            distance = str(row['Distance (%)'])
+            daily = str(row['Daily Move (%)'])
+            lines.append(f"{symbol:<12} {touches:>7} {crosses:>7} {distance:>9} {daily:>10}")
+        
+        lines.append("```")
+        return "\n".join(lines)
 
     async def send_report(self, message):
         #logging.info(f"Telegram message content:\n{message}")  # <-- Add this line
@@ -438,6 +517,7 @@ class TelegramReporter:
             parse_mode='MarkdownV2'
         )
         
+
 # --- Build top 40 above/below sections ---
 
 def build_top_sections(df, daily_changes):
@@ -451,9 +531,15 @@ def build_top_sections(df, daily_changes):
     above.columns = below.columns = ['Symbol', 'Distance (%)', 'Daily Movement (%)']
     return above, below
 
+
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
+    # Configuration variables for EMA touches
+    EMA_TOUCH_THRESHOLD = float(os.getenv("EMA_TOUCH_THRESHOLD", "0.5"))  # % distance threshold for EMA touch
+    EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))     # Number of candles to look back
+    MIN_TOUCHES_ALERT = int(os.getenv("MIN_TOUCHES_ALERT", "3"))          # Minimum touches to report
+
     # Fetch perp symbols (USDT pairs)
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
@@ -477,20 +563,25 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
     # Fetch 24h changes once
     daily_changes = binance_client.fetch_24h_changes()
 
+    # Timeframes to scan for EMA touches (only these)
+    ema_touch_timeframes = {'1h', '4h', '1d', '1w'}
+
+    # Store EMA touch results per timeframe for final report
+    ema_touch_reports = {}
+
     # Scan each timeframe
     for tf in ['5m', '15m', '30m', '1h', '4h', '1d', '1w']:
         logging.info(f"Scanning timeframe {tf}")
         results = []
+        ema_touch_results = []  # To store EMA touch data for all symbols
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
             for sym in symbols_to_process:
                 if sym in perp_symbols:
-                    # Use perp endpoint
-                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, market="perp")] = sym
+                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, limit=200, market="perp")] = sym
                 else:
-                    # Use spot endpoint
-                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, market="spot")] = sym
+                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, limit=200, market="spot")] = sym
 
             # Process futures
             for future in tqdm.tqdm(
@@ -501,8 +592,22 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                 sym = futures[future]
                 try:
                     df = future.result()
+
+                    # Existing distance calculation
                     pct_dist = calculate_pct_distance(df)
                     results.append((sym, pct_dist))
+
+                    # EMA touch analysis only for specified timeframes
+                    if tf in ema_touch_timeframes:
+                        touch_data = calculate_ema_touches(df, touch_threshold=EMA_TOUCH_THRESHOLD, lookback_period=EMA_LOOKBACK_PERIOD)
+                        ema_touch_results.append((
+                            sym,
+                            touch_data['touches'],
+                            touch_data['crosses'],
+                            touch_data['touch_density'],
+                            touch_data['current_distance']
+                        ))
+
                 except Exception as e:
                     logging.warning(f"Failed fetching {sym} {tf}: {e}")
 
@@ -511,24 +616,52 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
             continue
 
         df = pd.DataFrame(results, columns=['symbol', 'pct_distance'])
-
         above, below = build_top_sections(df, daily_changes)
 
-        if above.empty and below.empty:
-            logging.info(f"No data to report for timeframe {tf}, skipping Telegram message.")
-            continue
+        msg_parts = []
 
-        msg_above = reporter.format_section(tf, "Above", above)
-        msg_below = reporter.format_section(tf, "Below", below)
+        if not above.empty:
+            msg_parts.append(reporter.format_section(tf, "Above", above))
 
-        full_msg = f"{msg_above}\n\n{msg_below}\n\n"# + ("-"*30)
-        try:
-            await reporter.send_report(full_msg)
-            logging.info(f"Sent Telegram report for timeframe {tf}")
-        except Exception as e:
-            logging.error(f"Failed to send Telegram message: {e}")
+        if not below.empty:
+            msg_parts.append(reporter.format_section(tf, "Below", below))
+
+        # Send above/below report immediately
+        if msg_parts:
+            full_msg = "\n\n".join(msg_parts)
+            try:
+                await reporter.send_report(full_msg)
+                logging.info(f"Sent Telegram report for timeframe {tf}")
+            except Exception as e:
+                logging.error(f"Failed to send Telegram message: {e}")
+
+        # Store EMA touch data for final report (only for specified timeframes)
+        if tf in ema_touch_timeframes and ema_touch_results:
+            ema_touch_reports[tf] = pd.DataFrame(ema_touch_results, columns=[
+                'symbol', 'touches', 'crosses', 'touch_density', 'current_distance'
+            ])
 
         await asyncio.sleep(2)  # avoid Telegram flood limits
+
+    # --- Send combined EMA touch report at the end ---
+    for tf, ema_df in ema_touch_reports.items():
+        # Filter symbols with at least MIN_TOUCHES_ALERT touches
+        top_touchers = ema_df[ema_df['touches'] >= MIN_TOUCHES_ALERT].sort_values(
+            ['touches', 'touch_density'], ascending=[False, False]
+        ).head(20)
+
+        if top_touchers.empty:
+            logging.info(f"No EMA touch signals for timeframe {tf}, skipping EMA touch report.")
+            continue
+
+        msg = reporter.format_ema_touch_section(tf, top_touchers, daily_changes)
+        try:
+            await reporter.send_report(msg)
+            logging.info(f"Sent EMA touch Telegram report for timeframe {tf}")
+        except Exception as e:
+            logging.error(f"Failed to send EMA touch Telegram message: {e}")
+        await asyncio.sleep(2)
+
 
 # --- Async Entrypoint ---
 
