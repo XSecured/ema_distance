@@ -12,6 +12,12 @@ import random
 import tqdm
 import re
 
+# List of symbols to ignore in all scanning
+IGNORED_SYMBOLS = {
+    "USDPUSDT", "USD1USDT", "TUSDUSDT", "AEURUSDT", "USDCUSDT",
+    "ZKJUSDT", "FDUSDUSDT", "XUSDUSDT", "EURUSDT", "EURIUSDT"
+}
+
 # --- Proxy helper functions ---
 
 def fetch_proxies_from_url(url: str, default_scheme: str = "http") -> list:
@@ -329,6 +335,8 @@ class BinanceClient:
 
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
         attempt = 1
+        max_proxy_refresh_attempts = 3
+        proxy_refresh_attempts = 0
         while attempt <= self.max_retries:
             try:
                 proxies = self._get_proxy_dict()
@@ -344,6 +352,10 @@ class BinanceClient:
                 return df
             except RuntimeError as e:
                 if "No working proxies available" in str(e):
+                    proxy_refresh_attempts += 1
+                    if proxy_refresh_attempts > max_proxy_refresh_attempts:
+                        logging.error("Max proxy refresh attempts reached, aborting fetch_ohlcv")
+                        raise
                     logging.warning("All proxies failed, refreshing proxy pool and retrying...")
                     self.proxy_pool.refresh_proxies()
                     continue  # Do not increment attempt, just retry
@@ -393,49 +405,63 @@ def calculate_pct_distance(df):
     return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
 
-# --- NEW: EMA touch detection function ---
+# --- Enhanced EMA analysis function ---
 
-def calculate_ema_touches(df, touch_threshold=0.5, lookback_period=20):
+def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20):
     """
-    Count how many times price has touched/crossed EMA in the last N candles
-    
-    :param df: DataFrame with OHLCV data
-    :param touch_threshold: Percentage threshold to consider a "touch" (0.5% default)
-    :param lookback_period: Number of candles to look back (20 default)
-    :return: Dictionary with touch count, cross count, touch density, and current distance
+    Enhanced EMA analysis including volatility and momentum
     """
     df = df.copy()
     df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
-    
-    # Calculate percentage distance for each candle
     df['pct_distance'] = (df['close'] - df['EMA34']) / df['EMA34'] * 100
     
-    # Consider last N candles
     recent_data = df.tail(lookback_period)
     
     touches = 0
     crosses = 0
+    tight_ranges = 0  # Candles very close to EMA
+    volume_spikes = 0
+    
+    # Calculate average volume for comparison
+    avg_volume = recent_data['volume'].astype(float).mean()
     
     for i in range(1, len(recent_data)):
         current_dist = abs(recent_data.iloc[i]['pct_distance'])
         prev_dist = recent_data.iloc[i-1]['pct_distance']
         curr_dist_signed = recent_data.iloc[i]['pct_distance']
+        current_volume = float(recent_data.iloc[i]['volume'])
         
-        # Count as touch if within threshold
+        # Count touches
         if current_dist <= touch_threshold:
             touches += 1
             
-        # Count crosses (sign change in distance)
+        # Count very tight ranges (within 0.2%)
+        if current_dist <= 0.2:
+            tight_ranges += 1
+            
+        # Count crosses
         if (prev_dist > 0 and curr_dist_signed < 0) or (prev_dist < 0 and curr_dist_signed > 0):
             crosses += 1
+            
+        # Count volume spikes during EMA touches
+        if current_dist <= touch_threshold and current_volume > avg_volume * 1.5:
+            volume_spikes += 1
     
-    current_distance = recent_data.iloc[-1]['pct_distance']
+    # Calculate breakout probability score
+    breakout_score = (
+        touches * 2 +           # Base score for touches
+        crosses * 3 +           # Higher weight for crosses
+        tight_ranges * 1.5 +    # Tight consolidation bonus
+        volume_spikes * 2       # Volume confirmation bonus
+    )
     
     return {
         'touches': touches,
         'crosses': crosses,
-        'touch_density': touches / lookback_period * 100,  # % of candles that touched EMA
-        'current_distance': current_distance
+        'tight_ranges': tight_ranges,
+        'volume_spikes': volume_spikes,
+        'breakout_score': breakout_score,
+        'current_distance': recent_data.iloc[-1]['pct_distance']
     }
 
 
@@ -459,7 +485,7 @@ class TelegramReporter:
     def format_section(self, timeframe, position, df):
         # Escape only the header (outside code block)
         header = f"*{self._escape_md_v2(timeframe)} • {self._escape_md_v2(position)} Line*"
-        lines = [header, "```"]
+        lines = [header, "```
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
         for _, row in df.iterrows():
@@ -470,9 +496,8 @@ class TelegramReporter:
         lines.append("```")
         return "\n".join(lines)
 
-    # --- NEW: EMA touch report formatting ---
     def format_ema_touch_section(self, timeframe, df, daily_changes):
-        """Format EMA touch analysis section for Telegram message."""
+        """Format EMA enhanced analysis section for Telegram message."""
         if df.empty:
             return ""
             
@@ -481,24 +506,25 @@ class TelegramReporter:
         
         df_copy['Touches'] = df_copy['touches'].astype(str)
         df_copy['Crosses'] = df_copy['crosses'].astype(str)
+        df_copy['Tight Ranges'] = df_copy['tight_ranges'].astype(str)
+        df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
+        df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
         df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
         df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
         
-        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Distance (%)', 'Daily Move (%)']].copy()
-        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Distance (%)', 'Daily Move (%)']
+        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Tight Ranges', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
+        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Tight Ranges', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
         
         header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
-        lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'Distance':>9} {'Daily':>10}")
-        lines.append("-" * 48)
+        lines = [header, "```
+        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'Tight':>7} {'VolSpikes':>9} {'Score':>7} {'Dist(%)':>9} {'Daily':>10}")
+        lines.append("-" * 76)
         
         for _, row in display_df.iterrows():
-            symbol = str(row['Symbol'])
-            touches = str(row['Touches'])
-            crosses = str(row['Crosses'])
-            distance = str(row['Distance (%)'])
-            daily = str(row['Daily Move (%)'])
-            lines.append(f"{symbol:<12} {touches:>7} {crosses:>7} {distance:>9} {daily:>10}")
+            lines.append(
+                f"{row['Symbol']:<12} {row['Touches']:>7} {row['Crosses']:>7} {row['Tight Ranges']:>7} "
+                f"{row['Volume Spikes']:>9} {row['Breakout Score']:>7} {row['Distance (%)']:>9} {row['Daily Move (%)']:>10}"
+            )
         
         lines.append("```")
         return "\n".join(lines)
@@ -540,13 +566,13 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
     EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))     # Number of candles to look back
     MIN_TOUCHES_ALERT = int(os.getenv("MIN_TOUCHES_ALERT", "3"))          # Minimum touches to report
 
-    # Fetch perp symbols (USDT pairs)
+    # Fetch perp symbols (USDT pairs only)
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
         logging.error("No perp symbols fetched, aborting scan.")
         return
 
-    # Fetch spot symbols (USDT pairs)
+    # Fetch spot symbols (USDT pairs only)
     spot_symbols = set(binance_client.get_spot_symbols())
     if not spot_symbols:
         logging.error("No spot symbols fetched, aborting scan.")
@@ -559,6 +585,9 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
     if not symbols_to_process:
         logging.warning("No symbols to process, skipping scan.")
         return
+
+    # Remove ignored symbols
+    symbols_to_process = [s for s in symbols_to_process if s not in IGNORED_SYMBOLS]
 
     # Fetch 24h changes once
     daily_changes = binance_client.fetch_24h_changes()
@@ -597,15 +626,17 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     pct_dist = calculate_pct_distance(df)
                     results.append((sym, pct_dist))
 
-                    # EMA touch analysis only for specified timeframes
+                    # EMA enhanced analysis only for specified timeframes
                     if tf in ema_touch_timeframes:
-                        touch_data = calculate_ema_touches(df, touch_threshold=EMA_TOUCH_THRESHOLD, lookback_period=EMA_LOOKBACK_PERIOD)
+                        analysis = calculate_enhanced_ema_analysis(df, touch_threshold=EMA_TOUCH_THRESHOLD, lookback_period=EMA_LOOKBACK_PERIOD)
                         ema_touch_results.append((
                             sym,
-                            touch_data['touches'],
-                            touch_data['crosses'],
-                            touch_data['touch_density'],
-                            touch_data['current_distance']
+                            analysis['touches'],
+                            analysis['crosses'],
+                            analysis['tight_ranges'],
+                            analysis['volume_spikes'],
+                            analysis['breakout_score'],
+                            analysis['current_distance']
                         ))
 
                 except Exception as e:
@@ -638,28 +669,28 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         # Store EMA touch data for final report (only for specified timeframes)
         if tf in ema_touch_timeframes and ema_touch_results:
             ema_touch_reports[tf] = pd.DataFrame(ema_touch_results, columns=[
-                'symbol', 'touches', 'crosses', 'touch_density', 'current_distance'
+                'symbol', 'touches', 'crosses', 'tight_ranges', 'volume_spikes', 'breakout_score', 'current_distance'
             ])
 
         await asyncio.sleep(2)  # avoid Telegram flood limits
 
-    # --- Send combined EMA touch report at the end ---
+    # --- Send combined EMA enhanced report at the end ---
     for tf, ema_df in ema_touch_reports.items():
         # Filter symbols with at least MIN_TOUCHES_ALERT touches
         top_touchers = ema_df[ema_df['touches'] >= MIN_TOUCHES_ALERT].sort_values(
-            ['touches', 'touch_density'], ascending=[False, False]
+            ['breakout_score', 'touches', 'tight_ranges'], ascending=[False, False, False]
         ).head(20)
 
         if top_touchers.empty:
-            logging.info(f"No EMA touch signals for timeframe {tf}, skipping EMA touch report.")
+            logging.info(f"No EMA enhanced signals for timeframe {tf}, skipping EMA enhanced report.")
             continue
 
         msg = reporter.format_ema_touch_section(tf, top_touchers, daily_changes)
         try:
             await reporter.send_report(msg)
-            logging.info(f"Sent EMA touch Telegram report for timeframe {tf}")
+            logging.info(f"Sent EMA enhanced Telegram report for timeframe {tf}")
         except Exception as e:
-            logging.error(f"Failed to send EMA touch Telegram message: {e}")
+            logging.error(f"Failed to send EMA enhanced Telegram message: {e}")
         await asyncio.sleep(2)
 
 
