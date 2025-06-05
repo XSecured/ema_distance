@@ -488,7 +488,7 @@ class TelegramReporter:
         display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Distance (%)', 'Daily Move (%)']
         
         header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
-        lines = [header, "```
+        lines = [header, "```"]
         lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'Distance':>9} {'Daily':>10}")
         lines.append("-" * 48)
         
