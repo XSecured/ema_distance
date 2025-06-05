@@ -407,7 +407,7 @@ def calculate_pct_distance(df):
 
 # --- Enhanced EMA analysis function with relaxed trend filter and no volatility filter ---
 
-def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=0.5):
+def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=3):
     """
     Enhanced EMA analysis with relaxed trend filter (price can be slightly below EMA).
     Volatility filter removed.
