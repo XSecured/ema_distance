@@ -405,12 +405,12 @@ def calculate_pct_distance(df):
     return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
 
-# --- Enhanced EMA analysis function with relaxed trend filter and no volatility filter ---
+# --- Enhanced EMA analysis function with crosses removed ---
 
 def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=3):
     """
     Enhanced EMA analysis with relaxed trend filter (price can be slightly below EMA).
-    Volatility filter removed.
+    Crosses removed, only touches kept.
     """
     df = df.copy()
     df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
@@ -419,7 +419,6 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
     recent_data = df.tail(lookback_period)
 
     touches = 0
-    crosses = 0
     volume_spikes = 0
 
     # Calculate average volume for comparison
@@ -432,17 +431,11 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
 
     for i in range(1, len(recent_data)):
         current_dist = abs(recent_data.iloc[i]['pct_distance'])
-        prev_dist = recent_data.iloc[i-1]['pct_distance']
-        curr_dist_signed = recent_data.iloc[i]['pct_distance']
         current_volume = float(recent_data.iloc[i]['volume'])
 
         # Count touches (price close to EMA)
         if current_dist <= touch_threshold:
             touches += 1
-
-        # Count crosses (sign change in distance)
-        if (prev_dist > 0 and curr_dist_signed < 0) or (prev_dist < 0 and curr_dist_signed > 0):
-            crosses += 1
 
         # Count volume spikes during EMA touches
         if current_dist <= touch_threshold and current_volume > avg_volume * 1.5:
@@ -450,13 +443,11 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
 
     breakout_score = (
         touches * 2 +           # Base score for touches
-        crosses * 3 +           # Higher weight for crosses
         volume_spikes * 2       # Volume confirmation bonus
     )
 
     return {
         'touches': touches,
-        'crosses': crosses,
         'volume_spikes': volume_spikes,
         'breakout_score': breakout_score,
         'current_distance': last_distance
@@ -495,7 +486,7 @@ class TelegramReporter:
         return "\n".join(lines)
 
     def format_ema_touch_section(self, timeframe, df, daily_changes):
-        """Format EMA enhanced analysis section for Telegram message."""
+        """Format EMA enhanced analysis section for Telegram message (crosses removed)."""
         if df.empty:
             return ""
 
@@ -503,23 +494,22 @@ class TelegramReporter:
         df_copy['daily'] = df_copy['symbol'].map(daily_changes)
 
         df_copy['Touches'] = df_copy['touches'].astype(str)
-        df_copy['Crosses'] = df_copy['crosses'].astype(str)
         df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
         df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
         df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
         df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
 
-        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
-        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
+        display_df = df_copy[['symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
+        display_df.columns = ['Symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
 
         header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
         lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'VolSpikes':>9} {'Score':>7} {'Dist(%)':>9} {'Daily':>10}")
-        lines.append("-" * 70)
+        lines.append(f"{'Symbol':<12} {'Touches':>7} {'VolSpikes':>9} {'Score':>7} {'Dist(%)':>9} {'Daily':>10}")
+        lines.append("-" * 60)
 
         for _, row in display_df.iterrows():
             lines.append(
-                f"{row['Symbol']:<12} {row['Touches']:>7} {row['Crosses']:>7} {row['Volume Spikes']:>9} "
+                f"{row['Symbol']:<12} {row['Touches']:>7} {row['Volume Spikes']:>9} "
                 f"{row['Breakout Score']:>7} {row['Distance (%)']:>9} {row['Daily Move (%)']:>10}"
             )
 
@@ -620,7 +610,6 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                         ema_touch_results.append((
                             sym,
                             analysis['touches'],
-                            analysis['crosses'],
                             analysis['volume_spikes'],
                             analysis['breakout_score'],
                             analysis['current_distance']
@@ -654,7 +643,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
         if tf in ema_touch_timeframes and ema_touch_results:
             ema_touch_reports[tf] = pd.DataFrame(ema_touch_results, columns=[
-                'symbol', 'touches', 'crosses', 'volume_spikes', 'breakout_score', 'current_distance'
+                'symbol', 'touches', 'volume_spikes', 'breakout_score', 'current_distance'
             ])
 
         await asyncio.sleep(2)
