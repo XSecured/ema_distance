@@ -407,7 +407,7 @@ def calculate_pct_distance(df):
 
 # --- Enhanced EMA analysis function with relaxed trend filter and no volatility filter ---
 
-def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=3):
+def calculate_enhanced_ema_analysis(df, touch_threshold=1, lookback_period=30, max_distance_below_ema=3):
     """
     Enhanced EMA analysis with relaxed trend filter (price can be slightly below EMA).
     Volatility filter removed.
@@ -556,8 +556,8 @@ def build_top_sections(df, daily_changes):
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
-    EMA_TOUCH_THRESHOLD = float(os.getenv("EMA_TOUCH_THRESHOLD", "0.5"))
-    EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))
+    EMA_TOUCH_THRESHOLD = float(os.getenv("EMA_TOUCH_THRESHOLD", "1"))
+    EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "30"))
     MIN_TOUCHES_ALERT = int(os.getenv("MIN_TOUCHES_ALERT", "3"))
     MAX_DISTANCE_BELOW_EMA = float(os.getenv("MAX_DISTANCE_BELOW_EMA", "3"))
 
