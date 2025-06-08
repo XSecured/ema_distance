@@ -513,10 +513,10 @@ class TelegramReporter:
 
         header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
         lines = [header, "```"]
-    
+        
         # Use consistent fixed-width formatting for both header and data
         row_format = "{:<12} {:>7} {:>9} {:>7} {:>9} {:>10}"
-    
+        
         # Format header with same widths
         header_row = row_format.format('Symbol', 'Touches', 'VolSpikes', 'Score', 'Dist(%)', 'Daily')
         lines.append(header_row)
@@ -536,6 +536,18 @@ class TelegramReporter:
 
         lines.append("```")
         return "\n".join(lines)
+
+    async def send_report(self, message):
+        await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=message,
+            parse_mode='MarkdownV2'
+        )
+        await self.bot.send_message(
+            chat_id=self.channel_username,
+            text=message,
+            parse_mode='MarkdownV2'
+        )
 
 # --- Build top 40 above/below sections ---
 
