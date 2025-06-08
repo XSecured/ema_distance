@@ -495,49 +495,47 @@ class TelegramReporter:
         return "\n".join(lines)
 
     def format_ema_touch_section(self, timeframe, df, daily_changes):
-        """Format EMA enhanced analysis section for Telegram message."""
-        if df.empty:
-            return ""
+    """Format EMA enhanced analysis section for Telegram message with proper alignment."""
+    if df.empty:
+        return ""
 
-        df_copy = df.copy()
-        df_copy['daily'] = df_copy['symbol'].map(daily_changes)
+    df_copy = df.copy()
+    df_copy['daily'] = df_copy['symbol'].map(daily_changes)
 
-        df_copy['Touches'] = df_copy['touches'].astype(str)
-        df_copy['Crosses'] = df_copy['crosses'].astype(str)
-        df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
-        df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
-        df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
-        df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
+    df_copy['Touches'] = df_copy['touches'].astype(str)
+    df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
+    df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
+    df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
+    df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
 
-        display_df = df_copy[['symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
-        display_df.columns = ['Symbol', 'Touches', 'Crosses', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
+    display_df = df_copy[['symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
+    display_df.columns = ['Symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
 
-        header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
-        lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Touches':>7} {'Crosses':>7} {'VolSpikes':>9} {'Score':>7} {'Dist(%)':>9} {'Daily':>10}")
-        lines.append("-" * 70)
+    header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
+    lines = [header, "```"]
+    
+    # Use consistent fixed-width formatting for both header and data
+    row_format = "{:<12} {:>7} {:>9} {:>7} {:>9} {:>10}"
+    
+    # Format header with same widths
+    header_row = row_format.format('Symbol', 'Touches', 'VolSpikes', 'Score', 'Dist(%)', 'Daily')
+    lines.append(header_row)
+    lines.append("-" * len(header_row))
 
-        for _, row in display_df.iterrows():
-            lines.append(
-                f"{row['Symbol']:<12} {row['Touches']:>7} {row['Crosses']:>7} {row['Volume Spikes']:>9} "
-                f"{row['Breakout Score']:>7} {row['Distance (%)']:>9} {row['Daily Move (%)']:>10}"
-            )
-
-        lines.append("```")
-        return "\n".join(lines)
-
-    async def send_report(self, message):
-        await self.bot.send_message(
-            chat_id=self.chat_id,
-            text=message,
-            parse_mode='MarkdownV2'
+    # Format each data row with same widths
+    for _, row in display_df.iterrows():
+        data_row = row_format.format(
+            row['Symbol'],
+            row['Touches'], 
+            row['Volume Spikes'],
+            row['Breakout Score'],
+            row['Distance (%)'],
+            row['Daily Move (%)']
         )
-        await self.bot.send_message(
-            chat_id=self.channel_username,
-            text=message,
-            parse_mode='MarkdownV2'
-        )
+        lines.append(data_row)
 
+    lines.append("```")
+    return "\n".join(lines)
 
 # --- Build top 40 above/below sections ---
 
