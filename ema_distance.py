@@ -495,47 +495,47 @@ class TelegramReporter:
         return "\n".join(lines)
 
     def format_ema_touch_section(self, timeframe, df, daily_changes):
-    """Format EMA enhanced analysis section for Telegram message with proper alignment."""
-    if df.empty:
-        return ""
+        """Format EMA enhanced analysis section for Telegram message with proper alignment."""
+        if df.empty:
+            return ""
 
-    df_copy = df.copy()
-    df_copy['daily'] = df_copy['symbol'].map(daily_changes)
+        df_copy = df.copy()
+        df_copy['daily'] = df_copy['symbol'].map(daily_changes)
 
-    df_copy['Touches'] = df_copy['touches'].astype(str)
-    df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
-    df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
-    df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
-    df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
+        df_copy['Touches'] = df_copy['touches'].astype(str)
+        df_copy['Volume Spikes'] = df_copy['volume_spikes'].astype(str)
+        df_copy['Breakout Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
+        df_copy['Distance (%)'] = df_copy['current_distance'].map('{:.2f}'.format)
+        df_copy['Daily Move (%)'] = df_copy['daily'].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
 
-    display_df = df_copy[['symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
-    display_df.columns = ['Symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
+        display_df = df_copy[['symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']].copy()
+        display_df.columns = ['Symbol', 'Touches', 'Volume Spikes', 'Breakout Score', 'Distance (%)', 'Daily Move (%)']
 
-    header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
-    lines = [header, "```"]
+        header = f"*{self._escape_md_v2(timeframe)} • Most Probable To Break Structure*"
+        lines = [header, "```"]
     
-    # Use consistent fixed-width formatting for both header and data
-    row_format = "{:<12} {:>7} {:>9} {:>7} {:>9} {:>10}"
+        # Use consistent fixed-width formatting for both header and data
+        row_format = "{:<12} {:>7} {:>9} {:>7} {:>9} {:>10}"
     
-    # Format header with same widths
-    header_row = row_format.format('Symbol', 'Touches', 'VolSpikes', 'Score', 'Dist(%)', 'Daily')
-    lines.append(header_row)
-    lines.append("-" * len(header_row))
+        # Format header with same widths
+        header_row = row_format.format('Symbol', 'Touches', 'VolSpikes', 'Score', 'Dist(%)', 'Daily')
+        lines.append(header_row)
+        lines.append("-" * len(header_row))
 
-    # Format each data row with same widths
-    for _, row in display_df.iterrows():
-        data_row = row_format.format(
-            row['Symbol'],
-            row['Touches'], 
-            row['Volume Spikes'],
-            row['Breakout Score'],
-            row['Distance (%)'],
-            row['Daily Move (%)']
-        )
-        lines.append(data_row)
+        # Format each data row with same widths
+        for _, row in display_df.iterrows():
+            data_row = row_format.format(
+                row['Symbol'],
+                row['Touches'], 
+                row['Volume Spikes'],
+                row['Breakout Score'],
+                row['Distance (%)'],
+                row['Daily Move (%)']
+            )
+            lines.append(data_row)
 
-    lines.append("```")
-    return "\n".join(lines)
+        lines.append("```")
+        return "\n".join(lines)
 
 # --- Build top 40 above/below sections ---
 
