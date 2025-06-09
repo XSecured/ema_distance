@@ -460,9 +460,6 @@ def check_timeframe_confluence(symbol, binance_client, perp_symbols, timeframes=
             confluence_score += 1
     return confluence_score
 
-# When calling the function, pass perp_symbols:
-confluence = check_timeframe_confluence(symbol, binance_client, perp_symbols)
-
 # --- MACD calculation ---
 
 def calculate_macd(df):
@@ -694,9 +691,17 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     results.append((sym, pct_dist))
 
                     if tf in ema_touch_timeframes:
+                        # Pass perp_symbols here to check_timeframe_confluence
+                        confluence = check_timeframe_confluence(sym, binance_client, perp_symbols)
+
                         analysis = calculate_comprehensive_breakout_score(df, binance_client, sym)
                         if analysis is None:
                             continue
+
+                        # Optionally incorporate confluence score into comprehensive_score or confirmation_factors if desired
+                        # For example:
+                        analysis['comprehensive_score'] += confluence * 2
+                        analysis['confirmation_factors'] += (confluence > 0)
 
                         ema_touch_results.append((
                             sym,
@@ -756,7 +761,6 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         except Exception as e:
             logging.error(f"Failed to send EMA enhanced Telegram message: {e}")
         await asyncio.sleep(2)
-
 
 # --- Async Entrypoint ---
 
