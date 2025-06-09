@@ -673,10 +673,8 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
             for sym in symbols_to_process:
-                if sym in perp_symbols:
-                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, limit=200, market="perp")] = sym
-                else:
-                    futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, limit=200, market="spot")] = sym
+                market = "perp" if sym in perp_symbols else "spot"
+                futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, limit=200, market=market)] = sym
 
             for future in tqdm.tqdm(
                 concurrent.futures.as_completed(futures),
@@ -691,17 +689,16 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     results.append((sym, pct_dist))
 
                     if tf in ema_touch_timeframes:
-                        # Pass perp_symbols here to check_timeframe_confluence
+                        # Pass perp_symbols here for confluence check
                         confluence = check_timeframe_confluence(sym, binance_client, perp_symbols)
 
                         analysis = calculate_comprehensive_breakout_score(df, binance_client, sym)
                         if analysis is None:
                             continue
 
-                        # Optionally incorporate confluence score into comprehensive_score or confirmation_factors if desired
-                        # For example:
+                        # Incorporate confluence into score and confirmations
                         analysis['comprehensive_score'] += confluence * 2
-                        analysis['confirmation_factors'] += (confluence > 0)
+                        analysis['confirmation_factors'] += int(confluence > 0)
 
                         ema_touch_results.append((
                             sym,
