@@ -449,11 +449,12 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
 
 # --- Multi-timeframe confluence check ---
 
-def check_timeframe_confluence(symbol, binance_client, timeframes=['4h', '1d']):
+def check_timeframe_confluence(symbol, binance_client, perp_symbols, timeframes=['4h', '1d']):
     confluence_score = 0
     for tf in timeframes:
         try:
-            df = binance_client.fetch_ohlcv(symbol, tf, limit=50)
+            market = "perp" if symbol in perp_symbols else "spot"
+            df = binance_client.fetch_ohlcv(symbol, tf, limit=50, market=market)
             analysis = calculate_enhanced_ema_analysis(df)
             if analysis and analysis['touches'] >= 2:
                 confluence_score += 1
