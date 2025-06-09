@@ -449,19 +449,19 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
 
 # --- Multi-timeframe confluence check ---
 
+# Function definition expects perp_symbols
 def check_timeframe_confluence(symbol, binance_client, perp_symbols, timeframes=['4h', '1d']):
     confluence_score = 0
     for tf in timeframes:
-        try:
-            market = "perp" if symbol in perp_symbols else "spot"
-            df = binance_client.fetch_ohlcv(symbol, tf, limit=50, market=market)
-            analysis = calculate_enhanced_ema_analysis(df)
-            if analysis and analysis['touches'] >= 2:
-                confluence_score += 1
-        except Exception as e:
-            logging.warning(f"Failed multi-timeframe confluence check for {symbol} {tf}: {e}")
+        market = "perp" if symbol in perp_symbols else "spot"
+        df = binance_client.fetch_ohlcv(symbol, tf, limit=50, market=market)
+        analysis = calculate_enhanced_ema_analysis(df)
+        if analysis and analysis['touches'] >= 2:
+            confluence_score += 1
     return confluence_score
 
+# When calling the function, pass perp_symbols:
+confluence = check_timeframe_confluence(symbol, binance_client, perp_symbols)
 
 # --- MACD calculation ---
 
