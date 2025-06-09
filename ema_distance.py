@@ -507,7 +507,7 @@ def detect_consolidation(df, lookback=20):
 
 # --- Comprehensive breakout scoring ---
 
-def calculate_comprehensive_breakout_score(df, binance_client, symbol):
+def calculate_comprehensive_breakout_score(df, binance_client, symbol, perp_symbols):
     base = calculate_enhanced_ema_analysis(df)
     if base is None:
         return None
@@ -516,7 +516,7 @@ def calculate_comprehensive_breakout_score(df, binance_client, symbol):
     vol_data = calculate_relative_volume(df)
     ema_data = calculate_multiple_ema_signals(df)
     consolidation_data = detect_consolidation(df)
-    confluence = check_timeframe_confluence(symbol, binance_client)
+    confluence = check_timeframe_confluence(symbol, binance_client, perp_symbols)  # Now passes perp_symbols
 
     score = base['breakout_score']
     if macd_data['macd_bullish']:
@@ -670,6 +670,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         results = []
         ema_touch_results = []
 
+        # Use ThreadPoolExecutor for blocking IO calls to Binance API
         with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
             for sym in symbols_to_process:
@@ -689,16 +690,10 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     results.append((sym, pct_dist))
 
                     if tf in ema_touch_timeframes:
-                        # Pass perp_symbols here for confluence check
-                        confluence = check_timeframe_confluence(sym, binance_client, perp_symbols)
-
-                        analysis = calculate_comprehensive_breakout_score(df, binance_client, sym)
+                        # Pass perp_symbols to scoring function
+                        analysis = calculate_comprehensive_breakout_score(df, binance_client, sym, perp_symbols)
                         if analysis is None:
                             continue
-
-                        # Incorporate confluence into score and confirmations
-                        analysis['comprehensive_score'] += confluence * 2
-                        analysis['confirmation_factors'] += int(confluence > 0)
 
                         ema_touch_results.append((
                             sym,
