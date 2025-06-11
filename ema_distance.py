@@ -621,7 +621,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
     ema_touch_timeframes = {'1h', '4h', '1d', '1w'}
 
-    for tf in ['5m', '15m', '30m', '1h', '4h', '1d', '1w']:
+    for tf in ['5m', '15m', '1h', '4h', '1d', '1w']:
         logging.info(f"Scanning timeframe {tf}")
         ema_touch_results = []
 
