@@ -685,7 +685,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         if tf in ema_touch_timeframes and not df.empty:
             top_touchers = df[df['touches'] >= MIN_TOUCHES_ALERT].sort_values(
                 ['breakout_score', 'touches'], ascending=[False, False]
-            ).head(20)
+            ).head(30)
 
             if top_touchers.empty:
                 logging.info(f"No EMA enhanced signals for timeframe {tf}, skipping EMA enhanced report.")
