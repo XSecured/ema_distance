@@ -444,6 +444,72 @@ def detect_consolidation(df, lookback=20):
     return {'is_consolidating': is_consolidating, 'breakout_potential': breakout_potential}
 
 
+# --- EMA Direction Change Detection ---
+
+def detect_ema_direction_change(df, ema_period=34, lookback_trend=5, reversal_candles=2, pump_threshold=0.15):
+    """
+    Detect EMA34 direction changes - momentum shift detection (BULLISH ONLY)
+    
+    Parameters:
+    - lookback_trend: How many candles to check for previous trend (default 5)
+    - reversal_candles: Consecutive candles needed for reversal confirmation (default 2) 
+    - pump_threshold: Percentage pump threshold required ALONG with consecutive candles (default 0.15%)
+    """
+    df = df.copy()
+    df['EMA34'] = df['close'].ewm(span=ema_period, adjust=False).mean()
+    
+    # Calculate EMA percentage changes
+    df['ema_pct_change'] = df['EMA34'].pct_change() * 100
+    
+    recent_data = df.tail(lookback_trend + reversal_candles)
+    
+    if len(recent_data) < lookback_trend + reversal_candles:
+        return {
+            'ema_direction_change': False,
+            'change_type': None,
+            'momentum_strength': 0,
+            'bearish_to_bullish': False,
+            'ema_pump_pct': 0
+        }
+    
+    # Split into trend period and reversal period
+    trend_period = recent_data.iloc[:-reversal_candles]
+    reversal_period = recent_data.iloc[-reversal_candles:]
+    
+    # BEARISH TO BULLISH DETECTION ONLY
+    # Was EMA trending down?
+    downward_candles = sum(1 for change in trend_period['ema_pct_change'] if change < -0.01)  # More than -0.01%
+    was_bearish = downward_candles >= lookback_trend * 0.6  # 60% of candles were bearish
+    
+    # Is EMA now trending up?
+    upward_candles = sum(1 for change in reversal_period['ema_pct_change'] if change > 0.01)  # More than 0.01%
+    consecutive_bullish = upward_candles == reversal_candles
+    
+    # Check for EMA pump
+    ema_start = reversal_period['EMA34'].iloc[0]
+    ema_end = reversal_period['EMA34'].iloc[-1]
+    ema_pump_pct = ((ema_end - ema_start) / ema_start) * 100 if ema_start > 0 else 0
+    has_ema_pump = ema_pump_pct >= pump_threshold
+    
+    # BOTH conditions must be met: consecutive bullish candles AND pump threshold
+    bearish_to_bullish = was_bearish and consecutive_bullish and has_ema_pump
+    
+    momentum_strength = 0
+    change_type = None
+    
+    if bearish_to_bullish:
+        change_type = 'bearish_to_bullish'
+        momentum_strength = max(ema_pump_pct, upward_candles * 0.5)  # Stronger signal = higher score
+    
+    return {
+        'ema_direction_change': bearish_to_bullish,
+        'change_type': change_type,
+        'bearish_to_bullish': bearish_to_bullish,
+        'momentum_strength': momentum_strength,
+        'ema_pump_pct': ema_pump_pct
+    }
+
+
 # --- EMA distance calculation (original function preserved for compatibility) ---
 
 def calculate_pct_distance(df):
@@ -457,7 +523,7 @@ def calculate_pct_distance(df):
 def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=0.5):
     """
     Enhanced EMA analysis using relative volume instead of volume spikes.
-    Includes MACD, multiple EMAs, consolidation detection, and improved scoring.
+    Includes MACD, multiple EMAs, consolidation detection, EMA momentum shift (bullish only), and improved scoring.
     """
     df = df.copy()
     df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
@@ -479,6 +545,9 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
     rel_vol_data = calculate_relative_volume(df, lookback_period)
     ema_signals = calculate_multiple_ema_signals(df)
     consolidation_data = detect_consolidation(df, lookback_period)
+    
+    # NEW: EMA direction change detection (bullish only)
+    direction_change_data = detect_ema_direction_change(df)
 
     # Enhanced scoring system with weighted components
     breakout_score = (
@@ -488,7 +557,9 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
         (2 if ema_signals['ema_alignment'] else 0) +  # EMA alignment (trend strength)
         (1 if ema_signals['above_all_emas'] else 0) +  # Price position
         (3 if consolidation_data['breakout_potential'] else 
-         1 if consolidation_data['is_consolidating'] else 0)  # Consolidation breakout
+         1 if consolidation_data['is_consolidating'] else 0) +  # Consolidation breakout
+        # NEW: BIG MOMENTUM SHIFT BONUS (bullish only)
+        (8 if direction_change_data['bearish_to_bullish'] else 0)  # Bearish to bullish EMA momentum shift
     )
 
     return {
@@ -502,7 +573,12 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
         'ema_alignment': ema_signals['ema_alignment'],
         'above_all_emas': ema_signals['above_all_emas'],
         'is_consolidating': consolidation_data['is_consolidating'],
-        'breakout_potential': consolidation_data['breakout_potential']
+        'breakout_potential': consolidation_data['breakout_potential'],
+        # NEW momentum shift data (bullish only)
+        'ema_direction_change': direction_change_data['ema_direction_change'],
+        'bearish_to_bullish': direction_change_data['bearish_to_bullish'],
+        'momentum_strength': direction_change_data['momentum_strength'],
+        'ema_pump_pct': direction_change_data.get('ema_pump_pct', 0)
     }
 
 # --- Telegram Reporter (async) ---
@@ -537,30 +613,34 @@ class TelegramReporter:
         return "\n".join(lines)
 
     def format_enhanced_ema_section(self, timeframe, df, daily_changes):
-        """Enhanced formatting with new indicators including MACD, relative volume, EMA alignment, and consolidation."""
+        """Enhanced formatting with momentum shift indicators (bullish only)."""
         if df.empty:
             return ""
 
         df_copy = df.copy()
         df_copy['daily'] = df_copy['symbol'].map(daily_changes)
 
-        # Format new columns with better readability
+        # Format columns with momentum shift indicators
         df_copy['Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
         df_copy['MACD'] = df_copy['macd_bullish'].map(lambda x: "✓" if x else "✗")
         df_copy['Vol'] = df_copy['relative_volume'].map('{:.1f}'.format)
         df_copy['EMA'] = df_copy['ema_alignment'].map(lambda x: "✓" if x else "✗")
-        df_copy['Consol'] = df_copy.apply(lambda row: "⚡" if row['breakout_potential'] else "📊" if row['is_consolidating'] else "", axis=1)
+        df_copy['Momentum'] = df_copy.apply(lambda row: 
+            "🚀" if row['bearish_to_bullish'] else "", axis=1)  # Only bullish momentum shift
+        df_copy['Consol'] = df_copy.apply(lambda row: 
+            "⚡" if row['breakout_potential'] else 
+            "📊" if row['is_consolidating'] else "", axis=1)
         df_copy['Daily'] = df_copy['daily'].map(lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A")
 
         header = f"*{self._escape_md_v2(timeframe)} • Enhanced Breakout Analysis*"
         lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Score':>5} {'MACD':>4} {'Vol':>5} {'EMA':>3} {'Con':>3} {'Daily':>8}")
-        lines.append("-" * 50)
+        lines.append(f"{'Symbol':<12} {'Score':>5} {'MACD':>4} {'Vol':>5} {'EMA':>3} {'Mom':>3} {'Con':>3} {'Daily':>8}")
+        lines.append("-" * 55)
 
         for _, row in df_copy.iterrows():
             lines.append(
                 f"{row['symbol']:<12} {row['Score']:>5} {row['MACD']:>4} "
-                f"{row['Vol']:>5} {row['EMA']:>3} {row['Consol']:>3} {row['Daily']:>8}"
+                f"{row['Vol']:>5} {row['EMA']:>3} {row['Momentum']:>3} {row['Consol']:>3} {row['Daily']:>8}"
             )
 
         lines.append("```")
@@ -596,10 +676,14 @@ def build_top_sections(df, daily_changes):
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
+    # Load environment variables with defaults
     EMA_TOUCH_THRESHOLD = float(os.getenv("EMA_TOUCH_THRESHOLD", "0.5"))
     EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))
     MIN_TOUCHES_ALERT = int(os.getenv("MIN_TOUCHES_ALERT", "3"))
     MAX_DISTANCE_BELOW_EMA = float(os.getenv("MAX_DISTANCE_BELOW_EMA", "0.5"))
+    EMA_TREND_LOOKBACK = int(os.getenv("EMA_TREND_LOOKBACK", "5"))
+    EMA_REVERSAL_CANDLES = int(os.getenv("EMA_REVERSAL_CANDLES", "2"))
+    EMA_PUMP_THRESHOLD = float(os.getenv("EMA_PUMP_THRESHOLD", "0.10"))
 
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
