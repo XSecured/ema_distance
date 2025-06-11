@@ -523,7 +523,7 @@ class TelegramReporter:
     def format_section(self, timeframe, position, df):
         # Escape only the header (outside code block)
         header = f"*{self._escape_md_v2(timeframe)} • {self._escape_md_v2(position)} Line*"
-        lines = [header, "```
+        lines = [header, "```"]
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
         for _, row in df.iterrows():
@@ -551,7 +551,7 @@ class TelegramReporter:
         df_copy['Daily'] = df_copy['daily'].map(lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A")
 
         header = f"*{self._escape_md_v2(timeframe)} • Enhanced Breakout Analysis*"
-        lines = [header, "```
+        lines = [header, "```"]
         lines.append(f"{'Symbol':<12} {'Score':>5} {'MACD':>4} {'Vol':>5} {'EMA':>3} {'Con':>3} {'Daily':>8}")
         lines.append("-" * 50)
 
