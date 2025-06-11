@@ -446,14 +446,14 @@ def detect_consolidation(df, lookback=20):
 
 # --- EMA Direction Change Detection ---
 
-def detect_ema_direction_change(df, ema_period=34, lookback_trend=5, reversal_candles=2, pump_threshold=0.15):
+def detect_ema_direction_change(df, ema_period=34, lookback_trend=5, reversal_candles=2, pump_threshold=0.5):
     """
     Detect EMA34 direction changes - momentum shift detection (BULLISH ONLY)
     
     Parameters:
     - lookback_trend: How many candles to check for previous trend (default 5)
     - reversal_candles: Consecutive candles needed for reversal confirmation (default 2) 
-    - pump_threshold: Percentage pump threshold required ALONG with consecutive candles (default 0.15%)
+    - pump_threshold: Percentage pump threshold required as alternative to consecutive candles (default 0.5%)
     """
     df = df.copy()
     df['EMA34'] = df['close'].ewm(span=ema_period, adjust=False).mean()
@@ -491,8 +491,8 @@ def detect_ema_direction_change(df, ema_period=34, lookback_trend=5, reversal_ca
     ema_pump_pct = ((ema_end - ema_start) / ema_start) * 100 if ema_start > 0 else 0
     has_ema_pump = ema_pump_pct >= pump_threshold
     
-    # BOTH conditions must be met: consecutive bullish candles AND pump threshold
-    bearish_to_bullish = was_bearish and consecutive_bullish and has_ema_pump
+    # EITHER condition must be met: consecutive bullish candles OR pump threshold
+    bearish_to_bullish = was_bearish and (consecutive_bullish or has_ema_pump)
     
     momentum_strength = 0
     change_type = None
@@ -683,7 +683,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
     MAX_DISTANCE_BELOW_EMA = float(os.getenv("MAX_DISTANCE_BELOW_EMA", "0.5"))
     EMA_TREND_LOOKBACK = int(os.getenv("EMA_TREND_LOOKBACK", "5"))
     EMA_REVERSAL_CANDLES = int(os.getenv("EMA_REVERSAL_CANDLES", "2"))
-    EMA_PUMP_THRESHOLD = float(os.getenv("EMA_PUMP_THRESHOLD", "0.10"))
+    EMA_PUMP_THRESHOLD = float(os.getenv("EMA_PUMP_THRESHOLD", "0.30"))  # Changed default to 0.5%
 
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
