@@ -517,6 +517,21 @@ def calculate_pct_distance(df):
     last = df.iloc[-1]
     return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
+# --- Add this new function for unfiltered EMA distance calculation ---
+
+def calculate_simple_ema_distance(df):
+    """
+    Simple EMA distance calculation without any filtering - for traditional above/below reports.
+    """
+    df = df.copy()
+    df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
+    df['pct_distance'] = (df['close'] - df['EMA34']) / df['EMA34'] * 100
+    last_distance = df.iloc[-1]['pct_distance']
+    
+    return {
+        'symbol': None,  # Will be added later
+        'pct_distance': last_distance
+    }
 
 # --- Enhanced EMA analysis function with relative volume approach ---
 
@@ -672,7 +687,6 @@ def build_top_sections(df, daily_changes):
     above.columns = below.columns = ['Symbol', 'Distance (%)', 'Daily Movement (%)']
     return above, below
 
-
 # --- Async main scanning and reporting loop ---
 
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
@@ -683,7 +697,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
     MAX_DISTANCE_BELOW_EMA = float(os.getenv("MAX_DISTANCE_BELOW_EMA", "0.5"))
     EMA_TREND_LOOKBACK = int(os.getenv("EMA_TREND_LOOKBACK", "5"))
     EMA_REVERSAL_CANDLES = int(os.getenv("EMA_REVERSAL_CANDLES", "2"))
-    EMA_PUMP_THRESHOLD = float(os.getenv("EMA_PUMP_THRESHOLD", "0.30"))  # Changed default to 0.5%
+    EMA_PUMP_THRESHOLD = float(os.getenv("EMA_PUMP_THRESHOLD", "0.5"))  # Default to 0.5%
 
     perp_symbols = set(binance_client.get_perp_symbols())
     if not perp_symbols:
@@ -705,9 +719,10 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
     ema_touch_timeframes = {'1h', '4h', '1d', '1w'}
 
-    for tf in ['5m', '15m', '1h', '4h', '1d', '1w']:
+    for tf in ['5m', '15m', '30m', '1h', '4h', '1d', '1w']:
         logging.info(f"Scanning timeframe {tf}")
         ema_touch_results = []
+        traditional_results = []  # NEW: For unfiltered above/below reports
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
@@ -726,50 +741,51 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                 try:
                     df = future.result()
 
+                    # Enhanced analysis with filtering (for breakout signals only)
                     analysis = calculate_enhanced_ema_analysis(
                         df,
                         touch_threshold=EMA_TOUCH_THRESHOLD,
                         lookback_period=EMA_LOOKBACK_PERIOD,
                         max_distance_below_ema=MAX_DISTANCE_BELOW_EMA
                     )
-                    if analysis is None:
-                        continue
+                    if analysis is not None:
+                        ema_touch_results.append({**analysis, 'symbol': sym})
 
-                    ema_touch_results.append({**analysis, 'symbol': sym})
+                    # Simple distance calculation WITHOUT filtering (for traditional above/below reports)
+                    simple_analysis = calculate_simple_ema_distance(df)
+                    simple_analysis['symbol'] = sym
+                    traditional_results.append(simple_analysis)
 
                 except Exception as e:
                     logging.warning(f"Failed fetching {sym} {tf}: {e}")
 
-        if not ema_touch_results:
-            logging.warning(f"No OHLCV data fetched for timeframe {tf}, skipping Telegram message.")
-            continue
+        # Send traditional above/below EMA reports using UNFILTERED data
+        if traditional_results:
+            traditional_df = pd.DataFrame(traditional_results)
+            above, below = build_top_sections(traditional_df, daily_changes)
 
-        df = pd.DataFrame(ema_touch_results)
+            msg_parts = []
 
-        # Send traditional above/below EMA reports
-        above, below = build_top_sections(df, daily_changes)
+            if not above.empty:
+                msg_parts.append(reporter.format_section(tf, "Above", above))
 
-        msg_parts = []
+            if not below.empty:
+                msg_parts.append(reporter.format_section(tf, "Below", below))
 
-        if not above.empty:
-            msg_parts.append(reporter.format_section(tf, "Above", above))
+            if msg_parts:
+                full_msg = "\n\n".join(msg_parts)
+                try:
+                    await reporter.send_report(full_msg)
+                    logging.info(f"Sent Telegram report for timeframe {tf}")
+                except Exception as e:
+                    logging.error(f"Failed to send Telegram message: {e}")
 
-        if not below.empty:
-            msg_parts.append(reporter.format_section(tf, "Below", below))
-
-        if msg_parts:
-            full_msg = "\n\n".join(msg_parts)
-            try:
-                await reporter.send_report(full_msg)
-                logging.info(f"Sent Telegram report for timeframe {tf}")
-            except Exception as e:
-                logging.error(f"Failed to send Telegram message: {e}")
-
-        # Send enhanced breakout analysis for selected timeframes
-        if tf in ema_touch_timeframes and not df.empty:
+        # Send enhanced breakout analysis for selected timeframes using FILTERED data
+        if tf in ema_touch_timeframes and ema_touch_results:
+            df = pd.DataFrame(ema_touch_results)
             top_touchers = df[df['touches'] >= MIN_TOUCHES_ALERT].sort_values(
                 ['breakout_score', 'touches'], ascending=[False, False]
-            ).head(30)
+            ).head(20)
 
             if top_touchers.empty:
                 logging.info(f"No EMA enhanced signals for timeframe {tf}, skipping EMA enhanced report.")
@@ -783,7 +799,6 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                 await asyncio.sleep(2)
 
         await asyncio.sleep(2)
-
 
 # --- Async Entrypoint ---
 
