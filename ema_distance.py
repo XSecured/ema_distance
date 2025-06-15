@@ -514,9 +514,9 @@ def detect_ema_direction_change(df, ema_period=34, lookback_trend=5, reversal_ca
 # --- EMA distance calculation (original function preserved for compatibility) ---
 
 def calculate_pct_distance(df):
-    df['EMA89'] = df['close'].ewm(span=89 adjust=False).mean()
+    df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
     last = df.iloc[-1]
-    return (last['close'] - last['EMA89']) / last['EMA89'] * 100
+    return (last['close'] - last['EMA34']) / last['EMA34'] * 100
 
 # --- Add this new function for unfiltered EMA distance calculation ---
 
@@ -525,8 +525,8 @@ def calculate_simple_ema_distance(df):
     Simple EMA distance calculation without any filtering - for traditional above/below reports.
     """
     df = df.copy()
-    df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
-    df['pct_distance'] = (df['close'] - df['EMA89']) / df['EMA89'] * 100
+    df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
+    df['pct_distance'] = (df['close'] - df['EMA34']) / df['EMA34'] * 100
     last_distance = df.iloc[-1]['pct_distance']
     
     return {
