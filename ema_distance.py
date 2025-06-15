@@ -16,9 +16,9 @@ import re
 IGNORED_SYMBOLS = {
     "USDPUSDT", "USD1USDT", "TUSDUSDT", "AEURUSDT", "USDCUSDT",
     "ZKJUSDT", "FDUSDUSDT", "XUSDUSDT", "EURUSDT", "EURIUSDT",
-    "WBTCUSDT", "YFIUSDT", "BNBUSDT", "XMRUSDT",
-    "PROMUSDT", "ACMUSDT", "CITYUSDT", "JUVUSDT",
-    "WINUSDT", "PSGUSDT"
+    "WBTCUSDT", "YFIUSDT", "BNBUSDT", "XMRUSDT", "SANTOSUSDT",
+    "PROMUSDT", "ACMUSDT", "CITYUSDT", "JUVUSDT", "PSGUSDT",
+    "WINUSDT"
 }
 
 # --- Proxy helper functions ---
@@ -525,8 +525,8 @@ def calculate_simple_ema_distance(df):
     Simple EMA distance calculation without any filtering - for traditional above/below reports.
     """
     df = df.copy()
-    df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
-    df['pct_distance'] = (df['close'] - df['EMA34']) / df['EMA34'] * 100
+    df['EMA89'] = df['close'].ewm(span=89, adjust=False).mean()
+    df['pct_distance'] = (df['close'] - df['EMA89']) / df['EMA89'] * 100
     last_distance = df.iloc[-1]['pct_distance']
     
     return {
