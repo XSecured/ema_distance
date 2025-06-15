@@ -423,12 +423,12 @@ def calculate_relative_volume(df, lookback=20):
 # --- Multiple EMA signals ---
 
 def calculate_multiple_ema_signals(df):
+    df['EMA13'] = df['close'].ewm(span=13).mean()
     df['EMA21'] = df['close'].ewm(span=21).mean()
     df['EMA34'] = df['close'].ewm(span=34).mean()
-    df['EMA55'] = df['close'].ewm(span=55).mean()
     last = df.iloc[-1]
-    ema_alignment = (last['EMA21'] > last['EMA34'] > last['EMA55'])
-    above_all_emas = (last['close'] > last['EMA21'] > last['EMA34'])
+    ema_alignment = (last['EMA13'] > last['EMA21'] > last['EMA34'])
+    above_all_emas = (last['close'] > last['EMA13'] > last['EMA21'])
     return {'ema_alignment': ema_alignment, 'above_all_emas': above_all_emas}
 
 
@@ -717,9 +717,9 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
     daily_changes = binance_client.fetch_24h_changes()
 
-    ema_touch_timeframes = {'1h', '4h', '1d', '1w'}
+    ema_touch_timeframes = {'15m','1h', '4h', '1d', '1w'}
 
-    for tf in ['5m', '15m', '30m', '1h', '4h', '1d', '1w']:
+    for tf in ['5m', '15m', '1h', '4h', '1d', '1w']:
         logging.info(f"Scanning timeframe {tf}")
         ema_touch_results = []
         traditional_results = []  # NEW: For unfiltered above/below reports
