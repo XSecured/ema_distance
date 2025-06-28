@@ -536,10 +536,13 @@ def calculate_simple_ema_distance(df):
 
 # --- Enhanced EMA analysis function with relative volume approach ---
 
-def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20, max_distance_below_ema=0.5):
+def calculate_enhanced_ema_analysis(df, min_distance_above=0.1, lookback_period=20, max_distance_above=5.0):
     """
-    Enhanced EMA analysis using relative volume instead of volume spikes.
-    Includes MACD, multiple EMAs, consolidation detection, EMA momentum shift (bullish only), and improved scoring.
+    Enhanced EMA analysis based on being ABOVE the EMA34 line.
+    Instead of counting touches, we now focus on:
+    - How far above the EMA34 the price is
+    - How consistently it stays above
+    - Combined with other technical indicators
     """
     df = df.copy()
     df['EMA34'] = df['close'].ewm(span=34, adjust=False).mean()
@@ -547,42 +550,61 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
 
     recent_data = df.tail(lookback_period)
     
-    # Count touches
-    touches = sum(1 for i in range(1, len(recent_data)) 
-                 if abs(recent_data.iloc[i]['pct_distance']) <= touch_threshold)
-    
-    # Check trend filter
+    # Check if price is currently above EMA34
     last_distance = recent_data.iloc[-1]['pct_distance']
-    if last_distance < -max_distance_below_ema:
+    if last_distance < min_distance_above:  # Must be at least min_distance_above% above EMA
         return None
+    
+    # Don't include symbols that are too far above (potential exhaustion)
+    if last_distance > max_distance_above:
+        return None
+    
+    # Count how many candles in lookback period were above EMA34
+    candles_above = sum(1 for i in range(len(recent_data)) 
+                       if recent_data.iloc[i]['pct_distance'] > 0)
+    consistency_ratio = candles_above / len(recent_data)
+    
+    # Calculate the average distance above EMA when price was above
+    distances_above = [d for d in recent_data['pct_distance'] if d > 0]
+    avg_distance_above = sum(distances_above) / len(distances_above) if distances_above else 0
+    
+    # Check if price recently crossed above EMA34 (bullish momentum)
+    recent_cross = False
+    if len(recent_data) >= 3:
+        # Was below or near EMA 3 candles ago, now clearly above
+        if recent_data.iloc[-3]['pct_distance'] < 0.5 and last_distance > min_distance_above:
+            recent_cross = True
 
     # Calculate all technical indicators
     macd_data = calculate_macd(df)
     rel_vol_data = calculate_relative_volume(df, lookback_period)
     ema_signals = calculate_multiple_ema_signals(df)
     consolidation_data = detect_consolidation(df, lookback_period)
-    
-    # NEW: EMA direction change detection (bullish only)
     direction_change_data = detect_ema_direction_change(df)
 
-    # Enhanced scoring system with weighted components
+    # New scoring system based on being above EMA34
     breakout_score = (
-        touches * 3 +  # EMA touches (base signal)
+        (consistency_ratio * 10) +  # How consistently above EMA34 (0-10 points)
+        (min(avg_distance_above, 3) * 2) +  # Average distance above (capped at 6 points)
+        (5 if recent_cross else 0) +  # Recent cross above EMA34
         (5 if rel_vol_data['volume_surge'] else 0) +  # Volume surge confirmation
         (3 if macd_data['macd_bullish'] else 0) +  # MACD momentum
-        (2 if ema_signals['ema_alignment'] else 0) +  # EMA alignment (trend strength)
+        (2 if ema_signals['ema_alignment'] else 0) +  # EMA alignment
         (1 if ema_signals['above_all_emas'] else 0) +  # Price position
         (3 if consolidation_data['breakout_potential'] else 
          1 if consolidation_data['is_consolidating'] else 0) +  # Consolidation breakout
-        # NEW: BIG MOMENTUM SHIFT BONUS (bullish only)
-        (8 if direction_change_data['bearish_to_bullish'] else 0)  # Bearish to bullish EMA momentum shift
+        (8 if direction_change_data['bearish_to_bullish'] else 0)  # Momentum shift
     )
 
     return {
-        'touches': touches,
+        'symbol': None,  # Will be added later
         'breakout_score': breakout_score,
         'current_distance': last_distance,
-        'pct_distance': last_distance,  # For compatibility with existing code
+        'pct_distance': last_distance,
+        'consistency_above': consistency_ratio,
+        'avg_distance_above': avg_distance_above,
+        'recent_cross': recent_cross,
+        'candles_above': candles_above,
         'macd_bullish': macd_data['macd_bullish'],
         'relative_volume': rel_vol_data['relative_volume'],
         'volume_surge': rel_vol_data['volume_surge'],
@@ -590,7 +612,6 @@ def calculate_enhanced_ema_analysis(df, touch_threshold=0.5, lookback_period=20,
         'above_all_emas': ema_signals['above_all_emas'],
         'is_consolidating': consolidation_data['is_consolidating'],
         'breakout_potential': consolidation_data['breakout_potential'],
-        # NEW momentum shift data (bullish only)
         'ema_direction_change': direction_change_data['ema_direction_change'],
         'bearish_to_bullish': direction_change_data['bearish_to_bullish'],
         'momentum_strength': direction_change_data['momentum_strength'],
@@ -629,34 +650,41 @@ class TelegramReporter:
         return "\n".join(lines)
 
     def format_enhanced_ema_section(self, timeframe, df, daily_changes):
-        """Enhanced formatting with momentum shift indicators (bullish only)."""
+        """Enhanced formatting for above-EMA analysis."""
         if df.empty:
             return ""
 
+        # ---------- prepare dataframe ----------
         df_copy = df.copy()
         df_copy['daily'] = df_copy['symbol'].map(daily_changes)
 
-        # Format columns with momentum shift indicators
-        df_copy['Score'] = df_copy['breakout_score'].map('{:.1f}'.format)
-        df_copy['MACD'] = df_copy['macd_bullish'].map(lambda x: "✓" if x else "✗")
-        df_copy['Vol'] = df_copy['relative_volume'].map('{:.1f}'.format)
-        df_copy['EMA'] = df_copy['ema_alignment'].map(lambda x: "✓" if x else "✗")
-        df_copy['Momentum'] = df_copy.apply(lambda row: 
-            "🚀" if row['bearish_to_bullish'] else "", axis=1)  # Only bullish momentum shift
-        df_copy['Consol'] = df_copy.apply(lambda row: 
-            "⚡" if row['breakout_potential'] else 
-            "📊" if row['is_consolidating'] else "", axis=1)
-        df_copy['Daily'] = df_copy['daily'].map(lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A")
+        # numeric / emoji columns
+        df_copy['Score']    = df_copy['breakout_score'].map('{:.1f}'.format)
+        df_copy['Dist%']    = df_copy['current_distance'].map('{:.1f}'.format)
+        df_copy['Cons%']    = df_copy['consistency_above'].map(lambda x: f"{x*100:.0f}")
+        df_copy['Cross']    = df_copy['recent_cross'].map(lambda x: "✓" if x else "")
+        df_copy['Vol']      = df_copy['relative_volume'].map('{:.1f}'.format)
+        df_copy['Momentum'] = df_copy.apply(lambda r: "🚀" if r['bearish_to_bullish'] else "", axis=1)
+        df_copy['Daily']    = df_copy['daily'].map(lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A")
 
+        # ---------- text block ----------
         header = f"*{self._escape_md_v2(timeframe)} • Enhanced Breakout Analysis*"
         lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Score':>5} {'MACD':>4} {'Vol':>5} {'EMA':>3} {'Mom':>3} {'Con':>3} {'Daily':>8}")
-        lines.append("-" * 55)
 
+        # 1) header row – every column that will be printed
+        lines.append(
+            f"{'Symbol':<12} {'Score':>5} {'Dist%':>6} {'Cons%':>6} "
+            f"{'Cross':>5} {'MACD':>5} {'Vol':>5} {'EMA':>4} "
+            f"{'Mom':>3} {'Con':>3} {'Daily':>8}"
+        )
+        lines.append("-" * 72)
+
+        # 2) data rows – keep the exact same order as in the header
         for _, row in df_copy.iterrows():
             lines.append(
-                f"{row['symbol']:<12} {row['Score']:>5} {row['MACD']:>4} "
-                f"{row['Vol']:>5} {row['EMA']:>3} {row['Momentum']:>3} {row['Consol']:>3} {row['Daily']:>8}"
+                f"{row['symbol']:<12} {row['Score']:>5} {row['Dist%']:>6} {row['Cons%']:>6} "
+                f"{row['Cross']:>5} {row['MACD']:>5} {row['Vol']:>5} {row['EMA']:>4} "
+                f"{row['Momentum']:>3} {row['Consol']:>3} {row['Daily']:>8}"
             )
 
         lines.append("```")
@@ -688,14 +716,12 @@ def build_top_sections(df, daily_changes):
     above.columns = below.columns = ['Symbol', 'Distance (%)', 'Daily Movement (%)']
     return above, below
 
-# --- Async main scanning and reporting loop ---
-
 async def run_scan_and_report(binance_client, reporter, proxy_pool):
-    # Load environment variables with defaults
-    EMA_TOUCH_THRESHOLD = float(os.getenv("EMA_TOUCH_THRESHOLD", "0.5"))
+    # Update environment variables for the new approach
+    MIN_DISTANCE_ABOVE_EMA = float(os.getenv("MIN_DISTANCE_ABOVE_EMA", "0.1"))  # Must be at least 0.1% above
+    MAX_DISTANCE_ABOVE_EMA = float(os.getenv("MAX_DISTANCE_ABOVE_EMA", "5.0"))  # Not more than 5% above
     EMA_LOOKBACK_PERIOD = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))
-    MIN_TOUCHES_ALERT = int(os.getenv("MIN_TOUCHES_ALERT", "3"))
-    MAX_DISTANCE_BELOW_EMA = float(os.getenv("MAX_DISTANCE_BELOW_EMA", "0.5"))
+    MIN_BREAKOUT_SCORE = float(os.getenv("MIN_BREAKOUT_SCORE", "10"))  # Minimum score to report
     EMA_TREND_LOOKBACK = int(os.getenv("EMA_TREND_LOOKBACK", "5"))
     EMA_REVERSAL_CANDLES = int(os.getenv("EMA_REVERSAL_CANDLES", "2"))
     EMA_PUMP_THRESHOLD = float(os.getenv("EMA_PUMP_THRESHOLD", "0.5"))  # Default to 0.5%
@@ -722,8 +748,8 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
 
     for tf in ['5m', '15m', '1h', '4h', '1d', '1w']:
         logging.info(f"Scanning timeframe {tf}")
-        ema_touch_results = []
-        traditional_results = []  # NEW: For unfiltered above/below reports
+        ema_above_results = []
+        traditional_results = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
@@ -742,24 +768,25 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                 try:
                     df = future.result()
 
-                    # Enhanced analysis with filtering (for breakout signals only)
+                    # Enhanced analysis for symbols above EMA34
                     analysis = calculate_enhanced_ema_analysis(
                         df,
-                        touch_threshold=EMA_TOUCH_THRESHOLD,
+                        min_distance_above=MIN_DISTANCE_ABOVE_EMA,
                         lookback_period=EMA_LOOKBACK_PERIOD,
-                        max_distance_below_ema=MAX_DISTANCE_BELOW_EMA
+                        max_distance_above=MAX_DISTANCE_ABOVE_EMA
                     )
                     if analysis is not None:
-                        ema_touch_results.append({**analysis, 'symbol': sym})
+                        analysis['symbol'] = sym
+                        ema_above_results.append(analysis)
 
-                    # Simple distance calculation WITHOUT filtering (for traditional above/below reports)
+                    # Simple distance calculation for traditional reports
                     simple_analysis = calculate_simple_ema_distance(df)
                     simple_analysis['symbol'] = sym
                     traditional_results.append(simple_analysis)
 
                 except Exception as e:
                     logging.warning(f"Failed fetching {sym} {tf}: {e}")
-
+                    
         # Send traditional above/below EMA reports using UNFILTERED data
         if traditional_results:
             traditional_df = pd.DataFrame(traditional_results)
@@ -782,21 +809,21 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     logging.error(f"Failed to send Telegram message: {e}")
 
         # Send enhanced breakout analysis for selected timeframes using FILTERED data
-        if tf in ema_touch_timeframes and ema_touch_results:
-            df = pd.DataFrame(ema_touch_results)
-            top_touchers = df[df['touches'] >= MIN_TOUCHES_ALERT].sort_values(
-                ['breakout_score', 'touches'], ascending=[False, False]
+        if tf in ema_touch_timeframes and ema_above_results:
+            df = pd.DataFrame(ema_above_results)
+            top_above_ema = df[df['breakout_score'] >= MIN_BREAKOUT_SCORE].sort_values(
+                'breakout_score', ascending=False
             ).head(20)
 
-            if top_touchers.empty:
-                logging.info(f"No EMA enhanced signals for timeframe {tf}, skipping EMA enhanced report.")
+            if top_above_ema.empty:
+                logging.info(f"No above-EMA signals for timeframe {tf}, skipping enhanced report.")
             else:
-                msg = reporter.format_enhanced_ema_section(tf, top_touchers, daily_changes)
+                msg = reporter.format_enhanced_ema_section(tf, top_above_ema, daily_changes)
                 try:
                     await reporter.send_report(msg)
-                    logging.info(f"Sent EMA enhanced Telegram report for timeframe {tf}")
+                    logging.info(f"Sent above-EMA enhanced report for timeframe {tf}")
                 except Exception as e:
-                    logging.error(f"Failed to send EMA enhanced Telegram message: {e}")
+                    logging.error(f"Failed to send above-EMA enhanced message: {e}")
                 await asyncio.sleep(2)
 
         await asyncio.sleep(2)
