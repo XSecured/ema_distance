@@ -649,44 +649,67 @@ class TelegramReporter:
         lines.append("```")
         return "\n".join(lines)
 
-    def format_enhanced_ema_section(self, timeframe, df, daily_changes):
-        """Enhanced formatting for above-EMA analysis."""
+    def format_enhanced_ema_section(self, timeframe: str, df: pd.DataFrame,
+                                    daily_changes: dict) -> str:
+        """Pretty printing for the *above-EMA* breakout list."""
+    
         if df.empty:
             return ""
-
-        # ---------- prepare dataframe ----------
+    
+        # ---------- Build printable dataframe ----------
         df_copy = df.copy()
-        df_copy['daily'] = df_copy['symbol'].map(daily_changes)
-
-        # numeric / emoji columns
-        df_copy['Score']    = df_copy['breakout_score'].map('{:.1f}'.format)
-        df_copy['Dist%']    = df_copy['current_distance'].map('{:.1f}'.format)
-        df_copy['Cons%']    = df_copy['consistency_above'].map(lambda x: f"{x*100:.0f}")
-        df_copy['Cross']    = df_copy['recent_cross'].map(lambda x: "✓" if x else "")
-        df_copy['Vol']      = df_copy['relative_volume'].map('{:.1f}'.format)
-        df_copy['Momentum'] = df_copy.apply(lambda r: "🚀" if r['bearish_to_bullish'] else "", axis=1)
-        df_copy['Daily']    = df_copy['daily'].map(lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A")
-
-        # ---------- text block ----------
-        header = f"*{self._escape_md_v2(timeframe)} • Enhanced Breakout Analysis*"
-        lines = [header, "```"]
-
-        # 1) header row – every column that will be printed
-        lines.append(
-            f"{'Symbol':<12} {'Score':>5} {'Dist%':>6} {'Cons%':>6} "
-            f"{'Cross':>5} {'MACD':>5} {'Vol':>5} {'EMA':>4} "
-            f"{'Mom':>3} {'Con':>3} {'Daily':>8}"
+        df_copy["daily"] = df_copy["symbol"].map(daily_changes)
+    
+        # numeric / text conversions ------------------------------------------------
+        df_copy["Score"]    = df_copy["breakout_score"].map("{:.1f}".format)
+        df_copy["Dist%"]    = df_copy["current_distance"].map("{:.1f}".format)
+        df_copy["Cons%"]    = df_copy["consistency_above"].map(lambda x: f"{x*100:.0f}")
+        df_copy["Cross"]    = df_copy["recent_cross"].map(lambda x: "✓" if x else "")
+        df_copy["Vol"]      = df_copy["relative_volume"].map("{:.1f}".format)
+        df_copy["Momentum"] = df_copy.apply(
+            lambda r: "🚀" if r["bearish_to_bullish"] else "", axis=1
         )
-        lines.append("-" * 72)
-
-        # 2) data rows – keep the exact same order as in the header
+        df_copy["Daily"] = df_copy["daily"].map(
+            lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A"
+        )
+    
+        # columns that were missing -------------------------------------------------
+        # MACD: show an arrow ↑ / ↓ depending on bullish signal
+        df_copy["MACD"] = df_copy["macd_bullish"].map(lambda x: "↑" if x else "↓")
+    
+        # EMA alignment flag
+        df_copy["EMA"] = df_copy["ema_alignment"].map(lambda x: "✓" if x else "")
+    
+        # Consolidation / breakout hint
+        #  ⚡ = breakout potential, □ = still consolidating, '' = none
+        def _consol(row):
+            if row["breakout_potential"]:
+                return "⚡"
+            if row["is_consolidating"]:
+                return "□"
+            return ""
+        df_copy["Con"] = df_copy.apply(_consol, axis=1)
+    
+        # ---------- Assemble markdown text block ----------
+        header  = f"*{self._escape_md_v2(timeframe)} • Enhanced Breakout Analysis*"
+        lines = [header, "```"]
+    
+        # Header row – widths chosen for neat alignment
+        lines.append(
+            f"{'Symbol':<12}{'Score':>6}{'Dist%':>6}{'Cons%':>6}"
+            f"{'Cross':>6}{'MACD':>6}{'Vol':>6}{'EMA':>5}"
+            f"{'Mom':>4}{'Con':>4}{'Daily':>9}"
+        )
+        lines.append("-" * 71)
+    
+        # Data rows – same order as header
         for _, row in df_copy.iterrows():
             lines.append(
-                f"{row['symbol']:<12} {row['Score']:>5} {row['Dist%']:>6} {row['Cons%']:>6} "
-                f"{row['Cross']:>5} {row['MACD']:>5} {row['Vol']:>5} {row['EMA']:>4} "
-                f"{row['Momentum']:>3} {row['Consol']:>3} {row['Daily']:>8}"
+                f"{row['symbol']:<12}{row['Score']:>6}{row['Dist%']:>6}{row['Cons%']:>6}"
+                f"{row['Cross']:>6}{row['MACD']:>6}{row['Vol']:>6}{row['EMA']:>5}"
+                f"{row['Momentum']:>4}{row['Con']:>4}{row['Daily']:>9}"
             )
-
+    
         lines.append("```")
         return "\n".join(lines)
 
