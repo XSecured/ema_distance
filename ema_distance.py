@@ -23,10 +23,10 @@ IGNORED_SYMBOLS = {
 }
 
 SHOW_D_PLUS = os.getenv("SHOW_D_PLUS", "True") == "True"
-SHOW_D_MINUS = os.getenv("SHOW_D_MINUS", "True") == "True"
+SHOW_D_MINUS = os.getenv("SHOW_D_MINUS", "True") == "False"
 SHOW_M_PLUS = os.getenv("SHOW_M_PLUS", "True") == "True"
-SHOW_M_MINUS = os.getenv("SHOW_M_MINUS", "True") == "True"
-OHLC_TIMEFRAMES = ['1d', '1w', '1M']
+SHOW_M_MINUS = os.getenv("SHOW_M_MINUS", "True") == "False"
+OHLC_TIMEFRAMES = ['1d', '1w']
 OHLC_LOOKBACK = int(os.getenv("OHLC_LOOKBACK", "60"))
 OHLC_ALERT_THRESHOLD = float(os.getenv("OHLC_ALERT_THRESHOLD", "2.0"))
 
@@ -830,7 +830,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         ema_above_results = []
         traditional_results = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {}
             for sym in symbols_to_process:
                 if sym in perp_symbols:
@@ -911,7 +911,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         logging.info(f"Scanning OHLC projections for timeframe {tf}")
         ohlc_results = []
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {}
             for sym in symbols_to_process:
                 market = "perp" if sym in perp_symbols else "spot"
