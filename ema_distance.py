@@ -66,7 +66,7 @@ def test_proxy(proxy: str, timeout=5) -> bool:
         logging.debug(f"Proxy {proxy} failed connectivity test: {e}")
         return False
 
-def test_proxies_concurrently(proxies: list, max_workers: int = 100, max_working: int = 20) -> list:
+def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working: int = 20) -> list:
     working = []
     tested = 0
     dead = 0
@@ -830,7 +830,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         ema_above_results = []
         traditional_results = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
             for sym in symbols_to_process:
                 if sym in perp_symbols:
@@ -911,7 +911,7 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
         logging.info(f"Scanning OHLC projections for timeframe {tf}")
         ohlc_results = []
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {}
             for sym in symbols_to_process:
                 market = "perp" if sym in perp_symbols else "spot"
