@@ -48,10 +48,10 @@ class Config:
         self.telegram_channel_username = os.getenv("TELEGRAM_CHANNEL_USERNAME", "")
         self.proxy_list_url = os.getenv("PROXY_LIST_URL", "")
 
-        self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "True"
-        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "False"
-        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "False"
-        self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "True"
+        self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "true"
+        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "false"
+        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "false"
+        self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "true"
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
         self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "2.0"))
 
@@ -142,7 +142,7 @@ class RobustProxyPool:
         cooldown_seconds: float = 90.0,
         ban_after_uses: int = 8,
         ban_below_rate: float = 0.25,
-        validation_concurrency: int = 50,
+        validation_concurrency: int = 100,
         refresh_interval: float = 180.0
     ):
         self.max_pool_size = max_pool_size
@@ -158,6 +158,8 @@ class RobustProxyPool:
         self._session: Optional[aiohttp.ClientSession] = None
         self._refresh_task: Optional[asyncio.Task] = None
         self._source_url: Optional[str] = None
+        self._last_populate_time: float = 0.0
+        self._populate_lock = asyncio.Lock()
 
     async def initialize(self, session: aiohttp.ClientSession, source_url: str):
         self._session = session
@@ -171,49 +173,69 @@ class RobustProxyPool:
             await self._populate_pool()
 
     async def _populate_pool(self):
-        try:
-            async with self._session.get(self._source_url, timeout=10) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    raw = {line.strip() for line in text.splitlines() if line.strip() and '.' in line}
-                    new_proxies = {p if "://" in p else f"http://{p}" for p in raw}
+        async with self._populate_lock:
+            self._last_populate_time = time.time()
+            try:
+                async with self._session.get(self._source_url, timeout=10) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        raw = {line.strip() for line in text.splitlines() if line.strip() and '.' in line}
+                        new_proxies = {p if "://" in p else f"http://{p}" for p in raw}
 
-                    to_validate = list(new_proxies - set(self._proxies.keys()))
-                    if not to_validate:
-                        return
+                        to_validate = list(new_proxies - set(self._proxies.keys()))
+                        if not to_validate:
+                            return
 
-                    sem = asyncio.Semaphore(self.validation_concurrency)
+                        sem = asyncio.Semaphore(self.validation_concurrency)
 
-                    async def validate(p):
-                        async with sem:
-                            start = time.time()
-                            try:
-                                async with self._session.get(
-                                    "https://fapi.binance.com/fapi/v1/time",
-                                    proxy=p,
-                                    timeout=7
-                                ) as r:
-                                    if r.status == 200:
-                                        return p, True, (time.time() - start) * 1000
-                            except:
-                                pass
-                            return p, False, 0
+                        async def validate(p):
+                            async with sem:
+                                start = time.time()
+                                try:
+                                    async with self._session.get(
+                                        "https://fapi.binance.com/fapi/v1/time",
+                                        proxy=p,
+                                        timeout=5
+                                    ) as r:
+                                        if r.status == 200:
+                                            return p, True, (time.time() - start) * 1000
+                                except:
+                                    pass
+                                return p, False, 0
 
-                    tasks = [validate(p) for p in to_validate]
-                    for coro in asyncio.as_completed(tasks):
-                        p, ok, lat = await coro
-                        if ok:
-                            async with self._lock:
-                                active_count = len([
-                                    pr for pr, s in self._proxies.items()
-                                    if s.state == ProxyState.ACTIVE
-                                ])
-                                if active_count < self.max_pool_size:
-                                    self._proxies[p] = ProxyStats(
-                                        successes=1, total_latency_ms=lat
-                                    )
-        except Exception as e:
-            logging.error(f"Proxy refresh error: {e}")
+                        tasks = [validate(p) for p in to_validate]
+                        for coro in asyncio.as_completed(tasks):
+                            p, ok, lat = await coro
+                            if ok:
+                                async with self._lock:
+                                    active_count = len([
+                                        pr for pr, s in self._proxies.items()
+                                        if s.state == ProxyState.ACTIVE
+                                    ])
+                                    if active_count < self.max_pool_size:
+                                        self._proxies[p] = ProxyStats(
+                                            successes=1, total_latency_ms=lat
+                                        )
+            except Exception as e:
+                logging.error(f"Proxy refresh error: {e}")
+
+    def _active_count(self) -> int:
+        return sum(1 for s in self._proxies.values() if s.state == ProxyState.ACTIVE)
+
+    def _cooling_count(self) -> int:
+        return sum(1 for s in self._proxies.values() if s.state == ProxyState.COOLING)
+
+    def _earliest_cooldown(self) -> float:
+        now = time.time()
+        times = [s.cooldown_until for s in self._proxies.values() if s.state == ProxyState.COOLING and s.cooldown_until > now]
+        return min(times) if times else 0.0
+
+    async def emergency_refresh(self):
+        now = time.time()
+        if now - self._last_populate_time < 10:
+            return
+        logging.warning("Proxy pool low (%d active, %d cooling), emergency refresh...", self._active_count(), self._cooling_count())
+        await self._populate_pool()
 
     async def get_proxy(self) -> Optional[str]:
         now = time.time()
@@ -265,7 +287,6 @@ class RobustProxyPool:
         if self._refresh_task:
             self._refresh_task.cancel()
 
-
 # =============================================================================
 # BINANCE SCANNER
 # =============================================================================
@@ -276,11 +297,22 @@ class BinanceScanner:
         self.sem = asyncio.Semaphore(1)
 
     async def _request(self, url: str, params: dict = None) -> Any:
-        for _ in range(5):
+        for attempt in range(5):
             proxy = await self.proxies.get_proxy()
             if not proxy:
-                await asyncio.sleep(0.5)
+                # Pool empty — try emergency refresh once, then wait for cooldowns
+                if attempt == 0:
+                    await self.proxies.emergency_refresh()
+                # If proxies are cooling, wait until the earliest one wakes up
+                cooldown = self.proxies._earliest_cooldown()
+                if cooldown > time.time():
+                    wait_time = min(cooldown - time.time() + 0.5, 10)
+                    logging.warning("No active proxies, waiting %.1fs for cooldowns...", wait_time)
+                    await asyncio.sleep(wait_time)
+                else:
+                    await asyncio.sleep(0.5)
                 continue
+
             start = time.time()
             try:
                 async with self.session.get(url, params=params, proxy=proxy, timeout=8) as resp:
