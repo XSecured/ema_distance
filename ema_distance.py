@@ -686,7 +686,7 @@ _shutdown_event = asyncio.Event()
 def _signal_handler(sig: int) -> None:
     logging.warning("Received signal %d, initiating graceful shutdown...", sig)
     _shutdown_event.set()
-
+    
 
 async def run() -> None:
     setup_logging()
@@ -711,14 +711,17 @@ async def run() -> None:
 
         daily = await scanner.fetch_24h_changes()
 
+        # Accumulate OHLC results from 1d and 1w so we don't fetch them twice
+        ohlc_accumulator: Dict[str, List[Dict[str, Any]]] = {"1d": [], "1w": []}
+
         for tf in ALL_TIMEFRAMES:
             if _shutdown_event.is_set():
                 logging.info("Shutdown requested, stopping scan loop.")
                 break
 
             logging.info("Scanning timeframe %s", tf)
-            enhanced_results = []
-            traditional_results = []
+            enhanced_results: List[Dict[str, Any]] = []
+            traditional_results: List[Dict[str, Any]] = []
 
             async def _process_symbol(sym: str) -> None:
                 if _shutdown_event.is_set():
@@ -732,6 +735,7 @@ async def run() -> None:
                     logging.debug("Fetch failed for %s %s: %s", sym, tf, e)
                     return
 
+                # Traditional EMA distance (unfiltered)
                 try:
                     simple = await engine.simple_ema(df)
                     if simple:
@@ -740,6 +744,7 @@ async def run() -> None:
                 except Exception as e:
                     logging.debug("Simple EMA calc failed for %s: %s", sym, e)
 
+                # Enhanced breakout analysis (filtered)
                 try:
                     enhanced = await engine.enhanced_ema(df, cfg)
                     if enhanced:
@@ -747,6 +752,34 @@ async def run() -> None:
                         enhanced_results.append(enhanced)
                 except Exception as e:
                     logging.debug("Enhanced EMA calc failed for %s: %s", sym, e)
+
+                # OHLC projections — reuse the same df for 1d/1w
+                if tf in ("1d", "1w"):
+                    try:
+                        projections = await engine.ohlc(df, cfg.ohlc_lookback)
+                        if not projections:
+                            return
+                        close = projections["current_close"]
+                        levels = []
+                        if cfg.show_d_plus:
+                            levels.append(("D+", projections["d_plus"]))
+                        if cfg.show_d_minus:
+                            levels.append(("D-", projections["d_minus"]))
+                        if cfg.show_m_minus:
+                            levels.append(("M-", projections["m_minus"]))
+                        if cfg.show_m_plus:
+                            levels.append(("M+", projections["m_plus"]))
+                        for name, value in levels:
+                            if value > 0:
+                                pct_dist = abs((close - value) / value * 100)
+                                if pct_dist <= cfg.ohlc_alert_threshold:
+                                    ohlc_accumulator[tf].append({
+                                        "symbol": sym,
+                                        "level": name,
+                                        "pct_dist": pct_dist,
+                                    })
+                    except Exception as e:
+                        logging.debug("OHLC calc failed for %s %s: %s", sym, tf, e)
 
             tasks = [asyncio.create_task(_process_symbol(s)) for s in all_syms]
             for coro in tqdm.as_completed(tasks, desc=f"Scanning {tf}", total=len(tasks)):
@@ -760,7 +793,7 @@ async def run() -> None:
                 tf, len(traditional_results), len(enhanced_results),
             )
 
-            # Traditional Above/Below
+            # ---- Traditional Above/Below Reports ----
             if traditional_results:
                 trad_df = pd.DataFrame(traditional_results)
                 above, below = build_top_sections(trad_df, daily)
@@ -777,7 +810,7 @@ async def run() -> None:
                         logging.error("Failed to send traditional report: %s", e)
                 await asyncio.sleep(1)
 
-            # Enhanced Breakout
+            # ---- Enhanced Breakout Report ----
             if tf in ENHANCED_TIMEFRAMES and enhanced_results:
                 enh_df = pd.DataFrame(enhanced_results)
                 top = enh_df[enh_df["breakout_score"] >= cfg.min_breakout_score].sort_values(
@@ -796,53 +829,13 @@ async def run() -> None:
 
             await asyncio.sleep(1)
 
-        # OHLC Projections
-        for tf in ["1d", "1w"]:
+        # ---- Send accumulated OHLC reports (already computed during 1d/1w scans) ----
+        for tf in ("1d", "1w"):
             if _shutdown_event.is_set():
                 break
-            logging.info("Scanning OHLC projections for %s", tf)
-            ohlc_results = []
-
-            async def _process_ohlc(sym: str) -> None:
-                market = "perp" if sym in perps else "spot"
-                try:
-                    df = await scanner.fetch_ohlcv(sym, tf, market, cfg.ohlc_lookback + 10)
-                    if df is None or df.empty:
-                        return
-                    projections = await engine.ohlc(df, cfg.ohlc_lookback)
-                    if not projections:
-                        return
-                    close = projections["current_close"]
-                    levels = []
-                    if cfg.show_d_plus:
-                        levels.append(("D+", projections["d_plus"]))
-                    if cfg.show_d_minus:
-                        levels.append(("D-", projections["d_minus"]))
-                    if cfg.show_m_minus:
-                        levels.append(("M-", projections["m_minus"]))
-                    if cfg.show_m_plus:
-                        levels.append(("M+", projections["m_plus"]))
-                    for name, value in levels:
-                        if value > 0:
-                            pct_dist = abs((close - value) / value * 100)
-                            if pct_dist <= cfg.ohlc_alert_threshold:
-                                ohlc_results.append({
-                                    "symbol": sym,
-                                    "level": name,
-                                    "pct_dist": pct_dist,
-                                })
-                except Exception as e:
-                    logging.debug("OHLC calc failed for %s %s: %s", sym, tf, e)
-
-            tasks = [asyncio.create_task(_process_ohlc(s)) for s in all_syms]
-            for coro in tqdm.as_completed(tasks, desc=f"OHLC {tf}", total=len(tasks)):
-                try:
-                    await coro
-                except Exception:
-                    pass
-
-            if ohlc_results:
-                results_df = pd.DataFrame(ohlc_results).sort_values("pct_dist").head(40)
+            results = ohlc_accumulator[tf]
+            if results:
+                results_df = pd.DataFrame(results).sort_values("pct_dist").head(40)
                 msg = reporter.format_ohlc_section(tf, results_df)
                 try:
                     await reporter.send(msg)
@@ -855,7 +848,7 @@ async def run() -> None:
 
         engine.shutdown()
         await proxies.shutdown()
-
+        
 
 async def main() -> None:
     loop = asyncio.get_event_loop()
