@@ -53,7 +53,7 @@ class Config:
         self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "false"
         self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "true"
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
-        self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "2.0"))
+        self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "10.0"))
 
         self.min_distance_above_ema = float(os.getenv("MIN_DISTANCE_ABOVE_EMA", "0.1"))
         self.max_distance_above_ema = float(os.getenv("MAX_DISTANCE_ABOVE_EMA", "5.0"))
