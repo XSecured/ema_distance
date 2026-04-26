@@ -649,7 +649,7 @@ class Reporter:
         header = f"*{self.esc(timeframe)} • {self.esc(position)} Line*"
         lines = [header, "```"]
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
-        lines.append("-" * 40)
+        lines.append("-" * 60)
         for _, row in df.iterrows():
             sym = clean_symbol(row["Symbol"])
             lines.append(
@@ -715,7 +715,7 @@ class Reporter:
             if subset.empty:
                 continue
 
-            subset = subset.sort_values("value", ascending=sort_ascending).head(40)
+            subset = subset.sort_values("pct_dist", ascending=sort_ascending).head(40)
 
             lines.append(f"*{self.esc(level_name)}*")
             lines.append("```")
