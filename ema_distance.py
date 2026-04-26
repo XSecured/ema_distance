@@ -683,7 +683,7 @@ class Reporter:
             if subset.empty:
                 continue
 
-            subset = subset.sort_values("value", ascending=sort_ascending).head(20)
+            subset = subset.sort_values("value", ascending=sort_ascending).head(40)
 
             lines.append(f"*{self.esc(level_name)}*")
             lines.append("```")
