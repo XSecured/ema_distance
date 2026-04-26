@@ -7,7 +7,6 @@ import re
 import signal
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -38,28 +37,17 @@ IGNORED_SYMBOLS = {
 ENHANCED_TIMEFRAMES = {"1d", "1w"}
 ALL_TIMEFRAMES = ["1d", "1w"]
 
-BACKUP_PROXY_URL = (
-    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt"
-)
-
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 class Config:
-    """Centralized configuration loaded from environment variables."""
-
     def __init__(self) -> None:
-        # Telegram
         self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self.telegram_channel_username = os.getenv("TELEGRAM_CHANNEL_USERNAME", "")
-
-        # Proxies
         self.proxy_list_url = os.getenv("PROXY_LIST_URL", "")
-        self.backup_proxy_url = os.getenv("BACKUP_PROXY_URL", BACKUP_PROXY_URL)
 
-        # OHLC
         self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "true"
         self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "false"
         self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "true"
@@ -67,7 +55,6 @@ class Config:
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
         self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "2.0"))
 
-        # EMA Analysis
         self.min_distance_above_ema = float(os.getenv("MIN_DISTANCE_ABOVE_EMA", "0.1"))
         self.max_distance_above_ema = float(os.getenv("MAX_DISTANCE_ABOVE_EMA", "5.0"))
         self.ema_lookback_period = int(os.getenv("EMA_LOOKBACK_PERIOD", "20"))
@@ -75,14 +62,6 @@ class Config:
         self.ema_trend_lookback = int(os.getenv("EMA_TREND_LOOKBACK", "5"))
         self.ema_reversal_candles = int(os.getenv("EMA_REVERSAL_CANDLES", "2"))
         self.ema_pump_threshold = float(os.getenv("EMA_PUMP_THRESHOLD", "0.5"))
-
-        # Pool / Concurrency
-        self.proxy_max_pool = int(os.getenv("PROXY_MAX_POOL", "25"))
-        self.proxy_min_pool = int(os.getenv("PROXY_MIN_POOL", "15"))
-        self.proxy_validation_concurrency = int(os.getenv("PROXY_VAL_CONCURRENCY", "50"))
-        self.proxy_refresh_interval = float(os.getenv("PROXY_REFRESH_INTERVAL", "180"))
-        self.fetch_concurrency = int(os.getenv("FETCH_CONCURRENCY", "50"))
-        self.calc_workers = int(os.getenv("CALC_WORKERS", "8"))
 
         self.validate()
 
@@ -102,16 +81,12 @@ class Config:
 # LOGGING
 # =============================================================================
 def setup_logging() -> None:
-    fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-    logging.basicConfig(
-        level=logging.INFO,
-        format=fmt,
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+    fmt = "%(asctime)s | %(levelname)-8s | %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt, handlers=[logging.StreamHandler(sys.stdout)])
 
 
 # =============================================================================
-# PROXY INFRASTRUCTURE
+# PROXY INFRASTRUCTURE  (exact original from your first file)
 # =============================================================================
 class ProxyState(Enum):
     ACTIVE = "active"
@@ -151,17 +126,14 @@ class ProxyStats:
         if self.state != ProxyState.ACTIVE:
             return 0.0
         score = self.success_rate
-        score *= 0.5 ** self.consecutive_failures
+        score *= (0.5 ** self.consecutive_failures)
         if self.avg_latency_ms < 9999:
             latency_factor = max(0.1, 1.0 - (self.avg_latency_ms / 5000))
-            score *= 0.6 + 0.4 * latency_factor
+            score *= (0.6 + 0.4 * latency_factor)
         return max(0.001, min(1.0, score))
 
 
 class RobustProxyPool:
-    """Production-grade async proxy pool with backup sources, health checks,
-    fastest-proxy tracking, and automatic recovery."""
-
     def __init__(
         self,
         max_pool_size: int = 25,
@@ -170,8 +142,8 @@ class RobustProxyPool:
         cooldown_seconds: float = 90.0,
         ban_after_uses: int = 8,
         ban_below_rate: float = 0.25,
-        validation_concurrency: int = 1,
-        refresh_interval: float = 180.0,
+        validation_concurrency: int = 50,
+        refresh_interval: float = 180.0
     ):
         self.max_pool_size = max_pool_size
         self.min_pool_size = min_pool_size
@@ -181,113 +153,72 @@ class RobustProxyPool:
         self.ban_below_rate = ban_below_rate
         self.validation_concurrency = validation_concurrency
         self.refresh_interval = refresh_interval
-
         self._proxies: Dict[str, ProxyStats] = {}
         self._lock = asyncio.Lock()
         self._session: Optional[aiohttp.ClientSession] = None
-        self._source_url: Optional[str] = None
-        self._backup_url: Optional[str] = None
         self._refresh_task: Optional[asyncio.Task] = None
-        self._fastest_proxy: Optional[str] = None
-        self._stop_event = asyncio.Event()
+        self._source_url: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    async def initialize(
-        self,
-        session: aiohttp.ClientSession,
-        source_url: str,
-        backup_url: Optional[str] = None,
-    ) -> None:
+    async def initialize(self, session: aiohttp.ClientSession, source_url: str):
         self._session = session
         self._source_url = source_url
-        self._backup_url = backup_url
-
-        await self._populate_pool(primary=True)
-        if self._active_count() < self.min_pool_size and self._backup_url:
-            logging.warning("Primary proxy source insufficient (%d/%d), trying backup...",
-                            self._active_count(), self.min_pool_size)
-            await self._populate_pool(primary=False)
-
-        if self._active_count() == 0:
-            raise RuntimeError("No working proxies available from primary or backup sources.")
-
+        await self._populate_pool()
         self._refresh_task = asyncio.create_task(self._refresh_loop())
-        logging.info("Proxy pool initialized with %d active proxies.", self._active_count())
 
-    # ------------------------------------------------------------------
-    def _active_count(self) -> int:
-        return sum(1 for s in self._proxies.values() if s.state == ProxyState.ACTIVE)
+    async def _refresh_loop(self):
+        while True:
+            await asyncio.sleep(self.refresh_interval)
+            await self._populate_pool()
 
-    # ------------------------------------------------------------------
-    async def _refresh_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self.refresh_interval)
-            except asyncio.TimeoutError:
-                pass
-            if self._stop_event.is_set():
-                break
-            try:
-                await self._populate_pool(primary=True)
-                if self._active_count() < self.min_pool_size and self._backup_url:
-                    await self._populate_pool(primary=False)
-            except Exception as exc:
-                logging.error("Proxy refresh error: %s", exc)
-
-    # ------------------------------------------------------------------
-    async def _populate_pool(self, primary: bool = True) -> None:
-        url = self._source_url if primary else self._backup_url
-        if not url:
-            return
+    async def _populate_pool(self):
         try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with self._session.get(url, timeout=timeout) as resp:
-                if resp.status != 200:
-                    logging.warning("Proxy source %s returned %d", url, resp.status)
-                    return
-                text = await resp.text()
-        except Exception as exc:
-            logging.warning("Failed to fetch proxy list from %s: %s", url, exc)
-            return
+            async with self._session.get(self._source_url, timeout=10) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    raw = {line.strip() for line in text.splitlines() if line.strip() and '.' in line}
+                    new_proxies = {p if "://" in p else f"http://{p}" for p in raw}
 
-        raw = {line.strip() for line in text.splitlines() if line.strip() and "." in line}
-        new_proxies = {p if "://" in p else f"http://{p}" for p in raw}
-        to_validate = list(new_proxies - set(self._proxies.keys()))
-        if not to_validate:
-            return
+                    to_validate = list(new_proxies - set(self._proxies.keys()))
+                    if not to_validate:
+                        return
 
-        sem = asyncio.Semaphore(self.validation_concurrency)
+                    sem = asyncio.Semaphore(self.validation_concurrency)
 
-        async def _validate(proxy: str) -> Tuple[str, bool, float]:
-            async with sem:
-                start = time.time()
-                try:
-                    async with self._session.get(
-                        "https://api.binance.com/api/v3/time",
-                        proxy=proxy,
-                        timeout=aiohttp.ClientTimeout(total=8, connect=5),
-                    ) as r:
-                        if r.status == 200:
-                            return proxy, True, (time.time() - start) * 1000
-                except Exception:
-                    pass
-                return proxy, False, 0.0
+                    async def validate(p):
+                        async with sem:
+                            start = time.time()
+                            try:
+                                async with self._session.get(
+                                    "https://fapi.binance.com/fapi/v1/time",
+                                    proxy=p,
+                                    timeout=5
+                                ) as r:
+                                    if r.status == 200:
+                                        return p, True, (time.time() - start) * 1000
+                            except:
+                                pass
+                            return p, False, 0
 
-        tasks = [asyncio.create_task(_validate(p)) for p in to_validate]
-        for coro in asyncio.as_completed(tasks):
-            proxy, ok, lat = await coro
-            if ok:
-                async with self._lock:
-                    if self._active_count() < self.max_pool_size:
-                        self._proxies[proxy] = ProxyStats(
-                            successes=1, total_latency_ms=lat, last_success=time.time()
-                        )
+                    tasks = [validate(p) for p in to_validate]
+                    for coro in asyncio.as_completed(tasks):
+                        p, ok, lat = await coro
+                        if ok:
+                            async with self._lock:
+                                active_count = len([
+                                    pr for pr, s in self._proxies.items()
+                                    if s.state == ProxyState.ACTIVE
+                                ])
+                                if active_count < self.max_pool_size:
+                                    self._proxies[p] = ProxyStats(
+                                        successes=1, total_latency_ms=lat
+                                    )
+        except Exception as e:
+            logging.error(f"Proxy refresh error: {e}")
 
-    # ------------------------------------------------------------------
     async def get_proxy(self) -> Optional[str]:
         now = time.time()
         async with self._lock:
-            active: List[Tuple[str, float]] = []
+            active = []
             for p, s in self._proxies.items():
                 if s.state == ProxyState.COOLING and now > s.cooldown_until:
                     s.state = ProxyState.ACTIVE
@@ -299,20 +230,16 @@ class RobustProxyPool:
                 return None
 
             total = sum(score for _, score in active)
-            if total <= 0:
-                return active[-1][0]
-
             r = random.random() * total
-            cumulative = 0.0
+            curr = 0
             for p, score in active:
-                cumulative += score
-                if cumulative >= r:
+                curr += score
+                if curr >= r:
                     self._proxies[p].last_used = now
                     return p
             return active[-1][0]
 
-    # ------------------------------------------------------------------
-    async def report_success(self, proxy: str, latency: float) -> None:
+    async def report_success(self, proxy: str, latency: float):
         async with self._lock:
             if proxy in self._proxies:
                 s = self._proxies[proxy]
@@ -321,7 +248,7 @@ class RobustProxyPool:
                 s.total_latency_ms += latency
                 s.last_success = time.time()
 
-    async def report_failure(self, proxy: str) -> None:
+    async def report_failure(self, proxy: str):
         async with self._lock:
             if proxy in self._proxies:
                 s = self._proxies[proxy]
@@ -334,108 +261,59 @@ class RobustProxyPool:
                 if s.total_uses >= self.ban_after_uses and s.success_rate < self.ban_below_rate:
                     s.state = ProxyState.BANNED
 
-    # ------------------------------------------------------------------
-    async def shutdown(self) -> None:
-        self._stop_event.set()
+    async def shutdown(self):
         if self._refresh_task:
             self._refresh_task.cancel()
-            try:
-                await self._refresh_task
-            except asyncio.CancelledError:
-                pass
 
 
 # =============================================================================
 # BINANCE SCANNER
 # =============================================================================
 class BinanceScanner:
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        proxy_pool: RobustProxyPool,
-        max_retries: int = 5,
-        concurrency: int = 1,
-    ):
+    def __init__(self, session: aiohttp.ClientSession, proxy_pool: RobustProxyPool):
         self.session = session
         self.proxies = proxy_pool
-        self.max_retries = max_retries
-        self.sem = asyncio.Semaphore(concurrency)
-        self._request_count = 0
-        self._error_count = 0
+        self.sem = asyncio.Semaphore(50)
 
-    async def _request(self, url: str, params: Optional[dict] = None) -> Any:
-        for attempt in range(1, self.max_retries + 1):
+    async def _request(self, url: str, params: dict = None) -> Any:
+        for _ in range(5):
             proxy = await self.proxies.get_proxy()
             if not proxy:
-                logging.error("No active proxies available for request")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
-
             start = time.time()
             try:
-                async with self.sem:
-                    async with self.session.get(
-                        url,
-                        params=params,
-                        proxy=proxy,
-                        timeout=aiohttp.ClientTimeout(total=10, connect=5),
-                    ) as resp:
-                        latency = (time.time() - start) * 1000
-                        if resp.status == 200:
-                            await self.proxies.report_success(proxy, latency)
-                            self._request_count += 1
-                            return await resp.json()
-                        if resp.status == 429:
-                            retry_after = int(resp.headers.get("Retry-After", 2))
-                            logging.warning("Rate limited (429), sleeping %ds", retry_after)
-                            await asyncio.sleep(retry_after)
-                        else:
-                            logging.debug("HTTP %d from %s", resp.status, url)
-            except aiohttp.ClientError as exc:
-                logging.debug("Request exception (attempt %d): %s", attempt, exc)
-            except asyncio.TimeoutError:
-                logging.debug("Timeout on attempt %d", attempt)
-            except Exception as exc:
-                logging.debug("Unexpected error (attempt %d): %s", attempt, exc)
-
+                async with self.session.get(url, params=params, proxy=proxy, timeout=8) as resp:
+                    if resp.status == 200:
+                        await self.proxies.report_success(proxy, (time.time() - start) * 1000)
+                        return await resp.json()
+                    if resp.status == 429:
+                        await asyncio.sleep(2)
+            except:
+                pass
             await self.proxies.report_failure(proxy)
-            self._error_count += 1
-            backoff = self._backoff(attempt)
-            await asyncio.sleep(backoff)
-
-        logging.error("All %d retries failed for %s", self.max_retries, url)
         return None
-
-    @staticmethod
-    def _backoff(attempt: int) -> float:
-        return min(2 ** attempt + random.uniform(0, 1), 30)
 
     async def get_all_symbols(self) -> Tuple[Set[str], Set[str]]:
         f_info = await self._request("https://fapi.binance.com/fapi/v1/exchangeInfo")
         s_info = await self._request("https://api.binance.com/api/v3/exchangeInfo")
 
-        perps: Set[str] = set()
-        if f_info:
-            perps = {
-                s["symbol"]
-                for s in f_info.get("symbols", [])
-                if s.get("contractType") == "PERPETUAL"
-                and s.get("status") == "TRADING"
-                and s.get("quoteAsset") == "USDT"
-            }
+        perps = {
+            s["symbol"] for s in f_info.get("symbols", [])
+            if s.get("contractType") == "PERPETUAL"
+            and s.get("status") == "TRADING"
+            and s.get("quoteAsset") == "USDT"
+        } if f_info else set()
 
-        spots: Set[str] = set()
-        if s_info:
-            spots = {
-                s["symbol"]
-                for s in s_info.get("symbols", [])
-                if s.get("status") == "TRADING"
-                and s.get("quoteAsset") == "USDT"
-                and any(
-                    "SPOT" in perm
-                    for perm in itertools.chain.from_iterable(s.get("permissionSets", []))
-                )
-            }
+        spots = {
+            s["symbol"] for s in s_info.get("symbols", [])
+            if s.get("status") == "TRADING"
+            and s.get("quoteAsset") == "USDT"
+            and any(
+                "SPOT" in perm
+                for perm in itertools.chain.from_iterable(s.get("permissionSets", []))
+            )
+        } if s_info else set()
 
         logging.info("Fetched %d perp and %d spot USDT symbols", len(perps), len(spots))
         return perps, spots
@@ -443,16 +321,14 @@ class BinanceScanner:
     async def fetch_24h_changes(self) -> Dict[str, float]:
         s_data = await self._request("https://api.binance.com/api/v3/ticker/24hr")
         f_data = await self._request("https://fapi.binance.com/fapi/v1/ticker/24hr")
-        res: Dict[str, float] = {}
+        res = {}
         if s_data:
             res.update({i["symbol"]: float(i["priceChangePercent"]) for i in s_data})
         if f_data:
             res.update({i["symbol"]: float(i["priceChangePercent"]) for i in f_data})
         return res
 
-    async def fetch_ohlcv(
-        self, symbol: str, interval: str, market: str, limit: int
-    ) -> Optional[pd.DataFrame]:
+    async def fetch_ohlcv(self, symbol: str, interval: str, market: str, limit: int) -> Optional[pd.DataFrame]:
         base = (
             "https://fapi.binance.com/fapi/v1/klines"
             if market == "perp"
@@ -474,11 +350,13 @@ class BinanceScanner:
 
 
 # =============================================================================
-# CALCULATION ENGINE  (CPU-bound work wrapped in thread pool)
+# CALCULATION ENGINE
 # =============================================================================
 class CalculationEngine:
     def __init__(self, max_workers: int = 8):
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="calc")
+        self._executor = __import__("concurrent.futures").ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="calc"
+        )
 
     async def simple_ema(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         loop = asyncio.get_event_loop()
@@ -506,9 +384,6 @@ class CalculationEngine:
         self._executor.shutdown(wait=True)
 
 
-# ------------------------------------------------------------------
-# Pure calculation functions (run inside thread pool)
-# ------------------------------------------------------------------
 def _calc_simple_ema_distance(df: pd.DataFrame) -> Dict[str, Any]:
     df = df.copy()
     df["EMA34"] = df["close"].ewm(span=34, adjust=False).mean()
@@ -704,12 +579,8 @@ def build_top_sections(df: pd.DataFrame, daily_changes: Dict[str, float]) -> Tup
     df["daily"] = df["symbol"].map(daily_changes)
     df["Distance (%)"] = df["pct_distance"].map("{:.2f}".format)
     df["Daily Movement (%)"] = df["daily"].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
-    above = df.sort_values("pct_distance", ascending=False).head(40)[
-        ["symbol", "Distance (%)", "Daily Movement (%)"]
-    ]
-    below = df.sort_values("pct_distance").head(40)[
-        ["symbol", "Distance (%)", "Daily Movement (%)"]
-    ]
+    above = df.sort_values("pct_distance", ascending=False).head(40)[["symbol", "Distance (%)", "Daily Movement (%)"]]
+    below = df.sort_values("pct_distance").head(40)[["symbol", "Distance (%)", "Daily Movement (%)"]]
     above.columns = ["Symbol", "Distance (%)", "Daily Movement (%)"]
     below.columns = ["Symbol", "Distance (%)", "Daily Movement (%)"]
     return above, below
@@ -719,23 +590,16 @@ def build_top_sections(df: pd.DataFrame, daily_changes: Dict[str, float]) -> Tup
 # TELEGRAM REPORTER
 # =============================================================================
 class Reporter:
-    def __init__(
-        self,
-        token: str,
-        chat_id: str,
-        channel: str,
-        session: aiohttp.ClientSession,
-    ):
+    def __init__(self, token: str, chat_id: str, channel: str, session: aiohttp.ClientSession):
         self.url = f"https://api.telegram.org/bot{token}/sendMessage"
         self.chat_id = chat_id
         self.channel = channel
         self.session = session
 
-    @staticmethod
-    def esc(t: Any) -> str:
+    def esc(self, t: Any) -> str:
         return re.sub(r"([_**\[\]()~`>#+\-=|{}.!])", r"\\\1", str(t))
 
-    async def send(self, msg: str) -> None:
+    async def send(self, msg: str):
         for target in [self.chat_id, self.channel]:
             if not target:
                 continue
@@ -743,10 +607,9 @@ class Reporter:
                 payload = {"chat_id": target, "text": msg, "parse_mode": "MarkdownV2"}
                 async with self.session.post(self.url, json=payload) as r:
                     if r.status == 429:
-                        retry_after = int(r.headers.get("Retry-After", 5))
-                        await asyncio.sleep(retry_after)
-            except Exception as exc:
-                logging.debug("Telegram send error: %s", exc)
+                        await asyncio.sleep(int(r.headers.get("Retry-After", 5)))
+            except:
+                pass
 
     def format_section(self, timeframe: str, position: str, df: pd.DataFrame) -> str:
         header = f"*{self.esc(timeframe)} • {self.esc(position)} Line*"
@@ -760,9 +623,7 @@ class Reporter:
         lines.append("```")
         return "\n".join(lines)
 
-    def format_enhanced_ema_section(
-        self, timeframe: str, df: pd.DataFrame, daily_changes: Dict[str, float]
-    ) -> str:
+    def format_enhanced_ema_section(self, timeframe: str, df: pd.DataFrame, daily_changes: Dict[str, float]) -> str:
         if df.empty:
             return ""
         df_copy = df.copy()
@@ -772,16 +633,12 @@ class Reporter:
         df_copy["Cons%"] = df_copy["consistency_above"].map(lambda x: f"{x*100:.0f}")
         df_copy["Cross"] = df_copy["recent_cross"].map(lambda x: "✓" if x else "")
         df_copy["Vol"] = df_copy["relative_volume"].map("{:.1f}".format)
-        df_copy["Momentum"] = df_copy.apply(
-            lambda r: "🚀" if r["bearish_to_bullish"] else "", axis=1
-        )
-        df_copy["Daily"] = df_copy["daily"].map(
-            lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A"
-        )
+        df_copy["Momentum"] = df_copy.apply(lambda r: "🚀" if r["bearish_to_bullish"] else "", axis=1)
+        df_copy["Daily"] = df_copy["daily"].map(lambda x: f"{x:.1f}%" if pd.notnull(x) else "N/A")
         df_copy["MACD"] = df_copy["macd_bullish"].map(lambda x: "↑" if x else "↓")
         df_copy["EMA"] = df_copy["ema_alignment"].map(lambda x: "✓" if x else "")
 
-        def _consol(row: pd.Series) -> str:
+        def _consol(row):
             if row["breakout_potential"]:
                 return "⚡"
             if row["is_consolidating"]:
@@ -821,7 +678,7 @@ class Reporter:
 
 
 # =============================================================================
-# MAIN ORCHESTRATOR
+# MAIN
 # =============================================================================
 _shutdown_event = asyncio.Event()
 
@@ -835,61 +692,33 @@ async def run() -> None:
     setup_logging()
     cfg = Config()
 
-    connector = aiohttp.TCPConnector(
-        limit=200,
-        limit_per_host=50,
-        ttl_dns_cache=300,
-        use_dns_cache=True,
-        force_close=False,
-        enable_cleanup_closed=True,
-    )
-    timeout = aiohttp.ClientTimeout(total=30, connect=10)
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0)) as session:
+        proxies = RobustProxyPool()
+        await proxies.initialize(session, cfg.proxy_list_url)
 
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        proxies = RobustProxyPool(
-            max_pool_size=cfg.proxy_max_pool,
-            min_pool_size=cfg.proxy_min_pool,
-            validation_concurrency=cfg.proxy_validation_concurrency,
-            refresh_interval=cfg.proxy_refresh_interval,
-        )
-        await proxies.initialize(session, cfg.proxy_list_url, cfg.backup_proxy_url)
-
-        scanner = BinanceScanner(session, proxies, concurrency=cfg.fetch_concurrency)
+        scanner = BinanceScanner(session, proxies)
         reporter = Reporter(
             cfg.telegram_bot_token,
             cfg.telegram_chat_id,
             cfg.telegram_channel_username,
             session,
         )
-        engine = CalculationEngine(max_workers=cfg.calc_workers)
+        engine = CalculationEngine(max_workers=8)
 
-        try:
-            perps, spots = await scanner.get_all_symbols()
-        except Exception as exc:
-            logging.error("Failed to fetch symbols: %s", exc)
-            await proxies.shutdown()
-            return
-
+        perps, spots = await scanner.get_all_symbols()
         all_syms = sorted(list((perps | spots) - IGNORED_SYMBOLS))
         logging.info("Total symbols to scan after filtering: %d", len(all_syms))
 
-        try:
-            daily = await scanner.fetch_24h_changes()
-        except Exception as exc:
-            logging.error("Failed to fetch 24h changes: %s", exc)
-            daily = {}
+        daily = await scanner.fetch_24h_changes()
 
-        # ------------------------------------------------------------------
-        # Timeframe scan loop
-        # ------------------------------------------------------------------
         for tf in ALL_TIMEFRAMES:
             if _shutdown_event.is_set():
                 logging.info("Shutdown requested, stopping scan loop.")
                 break
 
             logging.info("Scanning timeframe %s", tf)
-            enhanced_results: List[Dict[str, Any]] = []
-            traditional_results: List[Dict[str, Any]] = []
+            enhanced_results = []
+            traditional_results = []
 
             async def _process_symbol(sym: str) -> None:
                 if _shutdown_event.is_set():
@@ -899,27 +728,25 @@ async def run() -> None:
                     df = await scanner.fetch_ohlcv(sym, tf, market, 200)
                     if df is None or df.empty:
                         return
-                except Exception as exc:
-                    logging.debug("Fetch failed for %s %s: %s", sym, tf, exc)
+                except Exception as e:
+                    logging.debug("Fetch failed for %s %s: %s", sym, tf, e)
                     return
 
-                # Traditional (unfiltered) EMA distance
                 try:
                     simple = await engine.simple_ema(df)
                     if simple:
                         simple["symbol"] = sym
                         traditional_results.append(simple)
-                except Exception as exc:
-                    logging.debug("Simple EMA calc failed for %s: %s", sym, exc)
+                except Exception as e:
+                    logging.debug("Simple EMA calc failed for %s: %s", sym, e)
 
-                # Enhanced breakout analysis
                 try:
                     enhanced = await engine.enhanced_ema(df, cfg)
                     if enhanced:
                         enhanced["symbol"] = sym
                         enhanced_results.append(enhanced)
-                except Exception as exc:
-                    logging.debug("Enhanced EMA calc failed for %s: %s", sym, exc)
+                except Exception as e:
+                    logging.debug("Enhanced EMA calc failed for %s: %s", sym, e)
 
             tasks = [asyncio.create_task(_process_symbol(s)) for s in all_syms]
             for coro in tqdm.as_completed(tasks, desc=f"Scanning {tf}", total=len(tasks)):
@@ -933,7 +760,7 @@ async def run() -> None:
                 tf, len(traditional_results), len(enhanced_results),
             )
 
-            # ---- Traditional Above/Below Reports ----
+            # Traditional Above/Below
             if traditional_results:
                 trad_df = pd.DataFrame(traditional_results)
                 above, below = build_top_sections(trad_df, daily)
@@ -946,11 +773,11 @@ async def run() -> None:
                     try:
                         await reporter.send("\n\n".join(parts))
                         logging.info("Sent traditional EMA report for %s", tf)
-                    except Exception as exc:
-                        logging.error("Failed to send traditional report: %s", exc)
+                    except Exception as e:
+                        logging.error("Failed to send traditional report: %s", e)
                 await asyncio.sleep(1)
 
-            # ---- Enhanced Breakout Report ----
+            # Enhanced Breakout
             if tf in ENHANCED_TIMEFRAMES and enhanced_results:
                 enh_df = pd.DataFrame(enhanced_results)
                 top = enh_df[enh_df["breakout_score"] >= cfg.min_breakout_score].sort_values(
@@ -961,29 +788,25 @@ async def run() -> None:
                     try:
                         await reporter.send(msg)
                         logging.info("Sent enhanced breakout report for %s", tf)
-                    except Exception as exc:
-                        logging.error("Failed to send enhanced report: %s", exc)
+                    except Exception as e:
+                        logging.error("Failed to send enhanced report: %s", e)
                 else:
                     logging.info("No enhanced signals above threshold for %s", tf)
                 await asyncio.sleep(1)
 
             await asyncio.sleep(1)
 
-        # ------------------------------------------------------------------
         # OHLC Projections
-        # ------------------------------------------------------------------
-        for tf in cfg.ohlc_timeframes:
+        for tf in ["1d", "1w"]:
             if _shutdown_event.is_set():
                 break
             logging.info("Scanning OHLC projections for %s", tf)
-            ohlc_results: List[Dict[str, Any]] = []
+            ohlc_results = []
 
             async def _process_ohlc(sym: str) -> None:
                 market = "perp" if sym in perps else "spot"
                 try:
-                    df = await scanner.fetch_ohlcv(
-                        sym, tf, market, cfg.ohlc_lookback + 10
-                    )
+                    df = await scanner.fetch_ohlcv(sym, tf, market, cfg.ohlc_lookback + 10)
                     if df is None or df.empty:
                         return
                     projections = await engine.ohlc(df, cfg.ohlc_lookback)
@@ -1008,8 +831,8 @@ async def run() -> None:
                                     "level": name,
                                     "pct_dist": pct_dist,
                                 })
-                except Exception as exc:
-                    logging.debug("OHLC calc failed for %s %s: %s", sym, tf, exc)
+                except Exception as e:
+                    logging.debug("OHLC calc failed for %s %s: %s", sym, tf, e)
 
             tasks = [asyncio.create_task(_process_ohlc(s)) for s in all_syms]
             for coro in tqdm.as_completed(tasks, desc=f"OHLC {tf}", total=len(tasks)):
@@ -1024,18 +847,14 @@ async def run() -> None:
                 try:
                     await reporter.send(msg)
                     logging.info("Sent OHLC projection report for %s", tf)
-                except Exception as exc:
-                    logging.error("Failed to send OHLC report: %s", exc)
+                except Exception as e:
+                    logging.error("Failed to send OHLC report: %s", e)
             else:
                 logging.info("No OHLC alerts for %s", tf)
             await asyncio.sleep(1)
 
-        # ------------------------------------------------------------------
-        # Cleanup
-        # ------------------------------------------------------------------
         engine.shutdown()
         await proxies.shutdown()
-        logging.info("Scan complete. Requests: %d | Errors: %d", scanner._request_count, scanner._error_count)
 
 
 async def main() -> None:
@@ -1044,8 +863,8 @@ async def main() -> None:
         loop.add_signal_handler(sig, lambda s=sig: _signal_handler(s))
     try:
         await run()
-    except Exception as exc:
-        logging.critical("Fatal error in main: %s", exc, exc_info=True)
+    except Exception as e:
+        logging.critical("Fatal error in main: %s", e, exc_info=True)
         sys.exit(1)
 
 
