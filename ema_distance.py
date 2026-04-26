@@ -191,7 +191,7 @@ class RobustProxyPool:
                                 async with self._session.get(
                                     "https://fapi.binance.com/fapi/v1/time",
                                     proxy=p,
-                                    timeout=5
+                                    timeout=7
                                 ) as r:
                                     if r.status == 200:
                                         return p, True, (time.time() - start) * 1000
