@@ -48,10 +48,10 @@ class Config:
         self.telegram_channel_username = os.getenv("TELEGRAM_CHANNEL_USERNAME", "")
         self.proxy_list_url = os.getenv("PROXY_LIST_URL", "")
 
-        self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "true"
-        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "false"
-        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "true"
-        self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "false"
+        self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "True"
+        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "False"
+        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "False"
+        self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "True"
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
         self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "2.0"))
 
@@ -273,7 +273,7 @@ class BinanceScanner:
     def __init__(self, session: aiohttp.ClientSession, proxy_pool: RobustProxyPool):
         self.session = session
         self.proxies = proxy_pool
-        self.sem = asyncio.Semaphore(50)
+        self.sem = asyncio.Semaphore(3)
 
     async def _request(self, url: str, params: dict = None) -> Any:
         for _ in range(5):
@@ -676,7 +676,7 @@ class Reporter:
         lines = [header, ""]
 
         # (level, sort_ascending) — D+/M- are above → highest first; D-/M+ are below → lowest first
-        sections = [("D+", False), ("M-", False), ("D-", True), ("M+", True)]
+        sections = [("D+", True), ("M-", True), ("D-", False), ("M+", False)]
 
         for level_name, sort_ascending in sections:
             subset = df[df["level"] == level_name].copy()
