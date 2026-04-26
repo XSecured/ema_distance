@@ -707,17 +707,37 @@ class Reporter:
         header = f"*{self.esc(timeframe)} • OHLC Projections*"
         lines = [header, ""]
 
-        # (level, sort_ascending) — D+/M- are above → highest first; D-/M+ are below → lowest first
-        sections = [("D+", True), ("M-", True), ("D-", False), ("M+", False)]
+        # (level, sort_by, sort_ascending, label)
+        # For D+/M- (above-open levels): want price ABOVE the level → positive signed_dist
+        #   → sort by signed_dist descending (highest = furthest above)
+        # For D-/M+ (below-open levels): want price BELOW the level → negative signed_dist
+        #   → sort by signed_dist ascending (most negative = furthest below)
+        sections = [
+            ("D+",  "signed_dist", False, "🔼 D+  (Above)"),
+            ("M-",  "signed_dist", False, "🔼 M-  (Above)"),
+            ("D-",  "signed_dist", True,  "🔽 D-  (Below)"),
+            ("M+",  "signed_dist", True,  "🔽 M+  (Below)"),
+        ]
 
-        for level_name, sort_ascending in sections:
+        for level_name, sort_col, sort_ascending, label in sections:
             subset = df[df["level"] == level_name].copy()
             if subset.empty:
                 continue
 
-            subset = subset.sort_values("pct_dist", ascending=sort_ascending).head(40)
+            # Filter: only show ones on the correct side of the level
+            if level_name in ("D+", "M-"):
+                # Must be ABOVE the level (price > projection)
+                subset = subset[subset["signed_dist"] > 0]
+            else:
+                # Must be BELOW the level (price < projection)
+                subset = subset[subset["signed_dist"] < 0]
 
-            lines.append(f"*{self.esc(level_name)}*")
+            if subset.empty:
+                continue
+
+            subset = subset.sort_values(sort_col, ascending=sort_ascending).head(40)
+
+            lines.append(f"*{self.esc(label)}*")
             lines.append("```")
             lines.append(f"{'Symbol':<12} {'Value':>16} {'Dist%':>8}")
             lines.append("-" * 38)
@@ -728,7 +748,6 @@ class Reporter:
             lines.append("")
 
         return "\n".join(lines)
-
 
 # =============================================================================
 # MAIN
@@ -824,14 +843,17 @@ async def run() -> None:
                             levels.append(("M+", projections["m_plus"]))
                         for name, value in levels:
                             if value > 0:
-                                pct_dist = abs((close - value) / value * 100)
-                                if pct_dist <= cfg.ohlc_alert_threshold:
+                                # Calculate SIGNED distance (not absolute)
+                                signed_dist = (close - value) / value * 100
+                                
+                                if abs(signed_dist) <= cfg.ohlc_alert_threshold:
                                     ohlc_accumulator[tf].append({
                                         "symbol": sym,
                                         "level": name,
-                                        "pct_dist": pct_dist,
+                                        "pct_dist": abs(signed_dist),      # absolute for filtering
+                                        "signed_dist": signed_dist,         # signed for sorting
                                         "value": value,
-                                    })
+                                    })                                
 
                     except Exception as e:
                         logging.debug("OHLC calc failed for %s %s: %s", sym, tf, e)
