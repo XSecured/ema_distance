@@ -11,6 +11,7 @@ from telegram import Bot
 import random
 import tqdm
 import re
+import numpy as np
 
 # List of symbols to ignore in all scanning
 IGNORED_SYMBOLS = {
@@ -20,6 +21,14 @@ IGNORED_SYMBOLS = {
     "PROMUSDT", "ACMUSDT", "CITYUSDT", "JUVUSDT", "PSGUSDT",
     "WINUSDT"
 }
+
+SHOW_D_PLUS = os.getenv("SHOW_D_PLUS", "True") == "True"
+SHOW_D_MINUS = os.getenv("SHOW_D_MINUS", "True") == "True"
+SHOW_M_PLUS = os.getenv("SHOW_M_PLUS", "True") == "True"
+SHOW_M_MINUS = os.getenv("SHOW_M_MINUS", "True") == "True"
+OHLC_TIMEFRAMES = ['1d', '1w', '1M']
+OHLC_LOOKBACK = int(os.getenv("OHLC_LOOKBACK", "60"))
+OHLC_ALERT_THRESHOLD = float(os.getenv("OHLC_ALERT_THRESHOLD", "2.0"))
 
 # --- Proxy helper functions ---
 
@@ -399,6 +408,37 @@ class BinanceClient:
 
         return combined_changes
 
+# --- OHLC Projections ---
+
+def calculate_ohlc_projections(df, lookback=60):
+    df = df.copy()
+    df['is_bull'] = df['close'] > df['open']
+    
+    df['manip_wick'] = np.where(df['is_bull'], df['open'] - df['low'], df['high'] - df['open'])
+    df['dist_dist'] = np.where(df['is_bull'], df['high'] - df['open'], df['open'] - df['low'])
+    
+    if len(df) < lookback + 1:
+        return None
+        
+    recent_closed = df.iloc[-(lookback+1):-1]
+    avg_manip = recent_closed['manip_wick'].mean()
+    avg_dist = recent_closed['dist_dist'].mean()
+    
+    current_open = df.iloc[-1]['open']
+    current_close = df.iloc[-1]['close']
+    
+    d_plus = current_open + avg_dist + avg_manip
+    d_minus = current_open - avg_dist - avg_manip
+    m_minus = current_open + avg_manip
+    m_plus = current_open - avg_manip
+    
+    return {
+        'd_plus': d_plus,
+        'd_minus': d_minus,
+        'm_minus': m_minus,
+        'm_plus': m_plus,
+        'current_close': current_close
+    }
 
 # --- MACD calculation ---
 
@@ -713,6 +753,22 @@ class TelegramReporter:
         lines.append("```")
         return "\n".join(lines)
 
+    def format_ohlc_section(self, timeframe: str, df: pd.DataFrame) -> str:
+        if df.empty:
+            return ""
+            
+        header = f"{self._escape_md_v2(timeframe)} OHLC Projections Alerts"
+        lines = [header, "```"]
+        lines.append(f"{'Symbol':<12} {'Level':<8} {'Dist %':>8}")
+        lines.append("-" * 30)
+        
+        for _, row in df.iterrows():
+            lines.append(f"{row['symbol']:<12} {row['level']:<8} {row['pct_dist']:>8.2f}")
+            
+        lines.append("```")
+        return "\n".join(lines)
+    
+    
     async def send_report(self, message):
         await self.bot.send_message(
             chat_id=self.chat_id,
@@ -849,6 +905,58 @@ async def run_scan_and_report(binance_client, reporter, proxy_pool):
                     logging.error(f"Failed to send above-EMA enhanced message: {e}")
                 await asyncio.sleep(2)
 
+        await asyncio.sleep(2)
+
+    for tf in OHLC_TIMEFRAMES:
+        logging.info(f"Scanning OHLC projections for timeframe {tf}")
+        ohlc_results = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+            futures = {}
+            for sym in symbols_to_process:
+                market = "perp" if sym in perp_symbols else "spot"
+                futures[executor.submit(binance_client.fetch_ohlcv, sym, tf, limit=OHLC_LOOKBACK + 10, market=market)] = sym
+                
+            for future in tqdm.tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc=f"Fetching OHLCV {tf} Projections"
+            ):
+                sym = futures[future]
+                try:
+                    df = future.result()
+                    projections = calculate_ohlc_projections(df, lookback=OHLC_LOOKBACK)
+                    
+                    if projections:
+                        close = projections['current_close']
+                        levels = []
+                        
+                        if SHOW_D_PLUS: levels.append(('D+', projections['d_plus']))
+                        if SHOW_D_MINUS: levels.append(('D-', projections['d_minus']))
+                        if SHOW_M_MINUS: levels.append(('M-', projections['m_minus']))
+                        if SHOW_M_PLUS: levels.append(('M+', projections['m_plus']))
+                        
+                        for name, value in levels:
+                            if value > 0:
+                                pct_dist = abs((close - value) / value * 100)
+                                if pct_dist <= OHLC_ALERT_THRESHOLD:
+                                    ohlc_results.append({
+                                        'symbol': sym,
+                                        'level': name,
+                                        'pct_dist': pct_dist
+                                    })
+                except Exception as e:
+                    logging.warning(f"Failed OHLC calculations for {sym} {tf}: {e}")
+                    
+        if ohlc_results:
+            results_df = pd.DataFrame(ohlc_results).sort_values('pct_dist').head(40)
+            msg = reporter.format_ohlc_section(tf, results_df)
+            try:
+                await reporter.send_report(msg)
+                logging.info(f"Sent OHLC projection report for timeframe {tf}")
+            except Exception as e:
+                logging.error(f"Failed to send OHLC Telegram message: {e}")
+                
         await asyncio.sleep(2)
 
 # --- Async Entrypoint ---
