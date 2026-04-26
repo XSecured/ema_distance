@@ -149,7 +149,7 @@ class ProxyPool:
                 logging.warning("No proxies available to update fastest proxy.")
                 return
 
-            max_workers = min(50, len(self.proxies))
+            max_workers = min(5, len(self.proxies))
             fastest = None
             fastest_time = float('inf')
 
@@ -158,7 +158,7 @@ class ProxyPool:
                     start = time.time()
                     resp = requests.get("https://api.binance.com/api/v3/time",
                                         proxies={"http": proxy, "https": proxy},
-                                        timeout=5)
+                                        timeout=10)
                     resp.raise_for_status()
                     return proxy, time.time() - start
                 except:
