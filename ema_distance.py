@@ -585,6 +585,8 @@ def build_top_sections(df: pd.DataFrame, daily_changes: Dict[str, float]) -> Tup
     below.columns = ["Symbol", "Distance (%)", "Daily Movement (%)"]
     return above, below
 
+def clean_symbol(sym: str) -> str:
+    return sym.replace("USDT", "")
 
 # =============================================================================
 # TELEGRAM REPORTER
@@ -617,8 +619,9 @@ class Reporter:
         lines.append(f"{'Symbol':<12} {'Distance (%)':>12} {'Daily Move (%)':>14}")
         lines.append("-" * 40)
         for _, row in df.iterrows():
+            sym = clean_symbol(row["Symbol"])
             lines.append(
-                f"{row['Symbol']:<12} {row['Distance (%)']:>12} {row['Daily Movement (%)']:>14}"
+                f"{sym:<12} {row['Distance (%)']:>12} {row['Daily Movement (%)']:>14}"
             )
         lines.append("```")
         return "\n".join(lines)
@@ -656,8 +659,9 @@ class Reporter:
         )
         lines.append("-" * 71)
         for _, row in df_copy.iterrows():
+            sym = clean_symbol(row["symbol"])
             lines.append(
-                f"{row['symbol']:<12}{row['Score']:>6}{row['Dist%']:>6}{row['Cons%']:>6}"
+                f"{sym:<12}{row['Score']:>6}{row['Dist%']:>6}{row['Cons%']:>6}"
                 f"{row['Cross']:>6}{row['MACD']:>6}{row['Vol']:>6}{row['EMA']:>5}"
                 f"{row['Momentum']:>4}{row['Con']:>4}{row['Daily']:>9}"
             )
@@ -667,13 +671,30 @@ class Reporter:
     def format_ohlc_section(self, timeframe: str, df: pd.DataFrame) -> str:
         if df.empty:
             return ""
-        header = f"{self.esc(timeframe)} OHLC Projections Alerts"
-        lines = [header, "```"]
-        lines.append(f"{'Symbol':<12} {'Level':<8} {'Dist %':>8}")
-        lines.append("-" * 30)
-        for _, row in df.iterrows():
-            lines.append(f"{row['symbol']:<12} {row['level']:<8} {row['pct_dist']:>8.2f}")
-        lines.append("```")
+
+        header = f"*{self.esc(timeframe)} • OHLC Projections*"
+        lines = [header, ""]
+
+        # (level, sort_ascending) — D+/M- are above → highest first; D-/M+ are below → lowest first
+        sections = [("D+", False), ("M-", False), ("D-", True), ("M+", True)]
+
+        for level_name, sort_ascending in sections:
+            subset = df[df["level"] == level_name].copy()
+            if subset.empty:
+                continue
+
+            subset = subset.sort_values("value", ascending=sort_ascending).head(20)
+
+            lines.append(f"*{self.esc(level_name)}*")
+            lines.append("```")
+            lines.append(f"{'Symbol':<12} {'Value':>16} {'Dist%':>8}")
+            lines.append("-" * 38)
+            for _, row in subset.iterrows():
+                sym = clean_symbol(row["symbol"])
+                lines.append(f"{sym:<12} {row['value']:>16.6f} {row['pct_dist']:>8.2f}")
+            lines.append("```")
+            lines.append("")
+
         return "\n".join(lines)
 
 
@@ -777,7 +798,9 @@ async def run() -> None:
                                         "symbol": sym,
                                         "level": name,
                                         "pct_dist": pct_dist,
+                                        "value": value,
                                     })
+
                     except Exception as e:
                         logging.debug("OHLC calc failed for %s %s: %s", sym, tf, e)
 
@@ -835,7 +858,7 @@ async def run() -> None:
                 break
             results = ohlc_accumulator[tf]
             if results:
-                results_df = pd.DataFrame(results).sort_values("pct_dist").head(40)
+                results_df = pd.DataFrame(results)
                 msg = reporter.format_ohlc_section(tf, results_df)
                 try:
                     await reporter.send(msg)
