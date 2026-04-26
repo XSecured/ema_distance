@@ -66,7 +66,7 @@ def test_proxy(proxy: str, timeout=5) -> bool:
         logging.debug(f"Proxy {proxy} failed connectivity test: {e}")
         return False
 
-def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working: int = 20) -> list:
+def test_proxies_concurrently(proxies: list, max_workers: int = 100, max_working: int = 20) -> list:
     working = []
     tested = 0
     dead = 0
@@ -93,7 +93,7 @@ def test_proxies_concurrently(proxies: list, max_workers: int = 50, max_working:
     return working[:max_working]
 
 class ProxyPool:
-    def __init__(self, max_pool_size: int = 25, proxy_check_interval: int = 600, max_failures: int = 3):
+    def __init__(self, max_pool_size: int = 25, proxy_check_interval: int = 1200, max_failures: int = 3):
         self.lock = threading.Lock()
         self.max_pool_size = max_pool_size
         self.proxy_check_interval = proxy_check_interval
