@@ -354,7 +354,7 @@ class BinanceScanner:
 # =============================================================================
 class CalculationEngine:
     def __init__(self, max_workers: int = 8):
-        self._executor = __import__("concurrent.futures").ThreadPoolExecutor(
+        self._executor = __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="calc"
         )
 
