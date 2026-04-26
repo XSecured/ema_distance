@@ -31,7 +31,7 @@ IGNORED_SYMBOLS = {
     "ZKJUSDT", "FDUSDUSDT", "XUSDUSDT", "EURUSDT", "EURIUSDT",
     "WBTCUSDT", "YFIUSDT", "BNBUSDT", "XMRUSDT", "SANTOSUSDT",
     "PROMUSDT", "ACMUSDT", "CITYUSDT", "JUVUSDT", "PSGUSDT",
-    "WINUSDT"
+    "WINUSDT", "USDEUSDT"
 }
 
 ENHANCED_TIMEFRAMES = {"1d", "1w"}
@@ -142,7 +142,7 @@ class RobustProxyPool:
         cooldown_seconds: float = 90.0,
         ban_after_uses: int = 8,
         ban_below_rate: float = 0.25,
-        validation_concurrency: int = 100,
+        validation_concurrency: int = 150,
         refresh_interval: float = 180.0
     ):
         self.max_pool_size = max_pool_size
@@ -195,7 +195,7 @@ class RobustProxyPool:
                                     async with self._session.get(
                                         "https://fapi.binance.com/fapi/v1/time",
                                         proxy=p,
-                                        timeout=5
+                                        timeout=8
                                     ) as r:
                                         if r.status == 200:
                                             return p, True, (time.time() - start) * 1000
