@@ -35,8 +35,8 @@ IGNORED_SYMBOLS = {
     "WINUSDT"
 }
 
-ENHANCED_TIMEFRAMES = {"15m", "1h", "4h", "1d", "1w"}
-ALL_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w"]
+ENHANCED_TIMEFRAMES = {"1d", "1w"}
+ALL_TIMEFRAMES = ["1d", "1w"]
 
 BACKUP_PROXY_URL = (
     "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt"
@@ -170,7 +170,7 @@ class RobustProxyPool:
         cooldown_seconds: float = 90.0,
         ban_after_uses: int = 8,
         ban_below_rate: float = 0.25,
-        validation_concurrency: int = 50,
+        validation_concurrency: int = 1,
         refresh_interval: float = 180.0,
     ):
         self.max_pool_size = max_pool_size
@@ -354,7 +354,7 @@ class BinanceScanner:
         session: aiohttp.ClientSession,
         proxy_pool: RobustProxyPool,
         max_retries: int = 5,
-        concurrency: int = 50,
+        concurrency: int = 1,
     ):
         self.session = session
         self.proxies = proxy_pool
