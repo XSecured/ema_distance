@@ -273,7 +273,7 @@ class BinanceScanner:
     def __init__(self, session: aiohttp.ClientSession, proxy_pool: RobustProxyPool):
         self.session = session
         self.proxies = proxy_pool
-        self.sem = asyncio.Semaphore(3)
+        self.sem = asyncio.Semaphore(1)
 
     async def _request(self, url: str, params: dict = None) -> Any:
         for _ in range(5):
