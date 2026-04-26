@@ -1,4 +1,4 @@
-name: Run Crypto Scanner Hourly
+name: Run Crypto Scanner
 
 on:
   schedule:
