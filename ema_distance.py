@@ -611,7 +611,7 @@ def build_top_sections(df: pd.DataFrame, daily_changes: Dict[str, float]) -> Tup
     df["daily"] = df["symbol"].map(daily_changes)
     df["Distance (%)"] = df["pct_distance"].map("{:.2f}".format)
     df["Daily Movement (%)"] = df["daily"].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
-    above = df.sort_values("pct_distance", ascending=False).head(40)[["symbol", "Distance (%)", "Daily Movement (%)"]]
+    above = df.sort_values("pct_distance", ascending=False).head(60)[["symbol", "Distance (%)", "Daily Movement (%)"]]
     below = df.sort_values("pct_distance").head(40)[["symbol", "Distance (%)", "Daily Movement (%)"]]
     above.columns = ["Symbol", "Distance (%)", "Daily Movement (%)"]
     below.columns = ["Symbol", "Distance (%)", "Daily Movement (%)"]
