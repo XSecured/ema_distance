@@ -140,7 +140,7 @@ class RobustProxyPool:
         min_pool_size: int = 15,
         max_consecutive_failures: int = 3,
         cooldown_seconds: float = 90.0,
-        ban_after_uses: int = 8,
+        ban_after_uses: int = 18,
         ban_below_rate: float = 0.25,
         validation_concurrency: int = 150,
         refresh_interval: float = 180.0
