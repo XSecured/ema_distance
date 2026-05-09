@@ -34,8 +34,8 @@ IGNORED_SYMBOLS = {
     "WINUSDT", "USDEUSDT"
 }
 
-ENHANCED_TIMEFRAMES = {"1d", "1w"}
-ALL_TIMEFRAMES = ["1d", "1w"]
+ENHANCED_TIMEFRAMES = {"4h"}
+ALL_TIMEFRAMES = ["4h", "1d", "1w"]
 
 
 # =============================================================================
