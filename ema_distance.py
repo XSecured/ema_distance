@@ -465,13 +465,13 @@ def _calc_enhanced_ema_analysis(
         + (5 if recent_cross else 0)
         + (5 if rel_vol_data["volume_surge"] else 0)
         + (3 if macd_data["macd_bullish"] else 0)
-        + (2 if ema_signals["ema_alignment"] else 0)
-        + (1 if ema_signals["above_all_emas"] else 0)
+        + (20 if ema_signals["ema_alignment"] else 0)
+        + (15 if ema_signals["above_all_emas"] else 0)
         + (
             3 if consolidation_data["breakout_potential"] else
             1 if consolidation_data["is_consolidating"] else 0
         )
-        + (8 if direction_change_data["bearish_to_bullish"] else 0)
+        + (4 if direction_change_data["bearish_to_bullish"] else 0)
     )
 
     return {
