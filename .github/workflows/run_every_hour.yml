@@ -9,6 +9,12 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
 
+    # Last-resort CI-side safety net, independent of the in-process
+    # watchdog (CONFIG.run_timeout_seconds, 25 min by default). Bounds
+    # worst-case runner time even if something bypasses the in-process
+    # watchdog entirely.
+    timeout-minutes: 35
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -17,6 +23,12 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.x'
+          # EFFICIENCY FIX: this workflow reinstalls every dependency from
+          # scratch on every scheduled run (every 3 hours, 8x/day) with no
+          # caching at all. actions/setup-python's built-in pip cache keys
+          # off requirements.txt's hash, so unchanged dependencies are
+          # restored from cache instead of re-downloaded/re-installed.
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
