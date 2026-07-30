@@ -142,7 +142,7 @@ class Config:
         # this file (see BinanceScanner.__init__). Now tunable, default
         # chosen to roughly match the proxy pool's min_pool_size so there's
         # normally a healthy proxy available for each in-flight request.
-        self.max_concurrency = int(os.getenv("MAX_CONCURRENCY", "3"))
+        self.max_concurrency = int(os.getenv("MAX_CONCURRENCY", "25"))
         self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "8"))
         self.max_retries = int(os.getenv("MAX_RETRIES", "5"))
 
