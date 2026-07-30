@@ -36,6 +36,68 @@ IGNORED_SYMBOLS = {
 
 ENHANCED_TIMEFRAMES = {"4h"}
 ALL_TIMEFRAMES = ["4h", "1d", "1w"]
+TIMEFRAME_MINUTES = {"4h": 240, "1d": 1440, "1w": 10080}
+
+
+# =============================================================================
+# DATA VALIDATION
+# Ported from RsiBot.py: a plausibility check on raw klines, run before any
+# of it is trusted. A proxy returning HTTP 200 with a JSON body shaped
+# exactly like real klines (right list-of-lists shape, numeric-looking
+# fields) tells us nothing about whether the data is actually current or
+# sane — a stale cached response or a truncated one parses identically to a
+# genuine one. Without this, that failure mode doesn't show up as a fetch
+# failure; it shows up as a "successful" fetch feeding the EMA/breakout
+# calculations real-looking but wrong numbers.
+# =============================================================================
+def validate_klines_payload(
+    raw: Any,
+    interval: str,
+    requested_limit: int,
+    now_ms: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """
+    Two checks, deliberately simple:
+      1. Freshness — the most recent candle's open time must be recent
+         relative to the timeframe's own duration.
+      2. Price sanity — every close must be a finite, positive number.
+
+    Deliberately NOT checked: array length vs. requested_limit. A newly
+    listed symbol can legitimately return far fewer candles than
+    requested; the EMA/breakout calculations already handle "too little
+    history" as insufficient data rather than a failure (see
+    _calc_enhanced_ema_analysis's len(recent_data) check and
+    _calc_ohlc_projections' len(df) check). Rejecting on length here would
+    misclassify a legitimate young listing as a fetch failure.
+    """
+    if not raw or not isinstance(raw, list) or len(raw) < 3:
+        got = len(raw) if isinstance(raw, list) else type(raw).__name__
+        return False, f"empty or degenerate payload ({got})"
+
+    try:
+        open_time_ms = int(float(raw[-1][0]))
+    except (IndexError, TypeError, ValueError):
+        return False, "malformed last candle (unreadable open time)"
+
+    interval_seconds = TIMEFRAME_MINUTES.get(interval, 60) * 60
+    tolerance_seconds = interval_seconds * 3 + 300
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    age_seconds = (now_ms - open_time_ms) / 1000.0
+    if abs(age_seconds) > tolerance_seconds:
+        return False, (
+            f"last candle is {age_seconds:.0f}s from now "
+            f"(tolerance {tolerance_seconds}s for {interval})"
+        )
+
+    for row in raw:
+        try:
+            close = float(row[4])
+        except (IndexError, TypeError, ValueError):
+            return False, "malformed close price in payload"
+        if not np.isfinite(close) or close <= 0:
+            return False, f"non-finite or non-positive close price ({close})"
+
+    return True, ""
 
 
 # =============================================================================
@@ -48,9 +110,18 @@ class Config:
         self.telegram_channel_username = os.getenv("TELEGRAM_CHANNEL_USERNAME", "")
         self.proxy_list_url = os.getenv("PROXY_LIST_URL", "")
 
+        # BUG FIX: show_d_minus and show_m_plus previously compared the env
+        # value against "false" instead of "true", while show_d_plus and
+        # show_m_minus (correctly) compared against "true". With no env
+        # vars set — the default case — that meant show_d_minus and
+        # show_m_plus silently evaluated to False instead of True: D- and
+        # M+ (half of the four OHLC projection levels the bot is designed
+        # to report symmetrically, per format_ohlc_section's "Above"/
+        # "Below" pairing of D+/M- and D-/M+) never fired by default. All
+        # four now consistently default to True via the same comparison.
         self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "true"
-        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "false"
-        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "false"
+        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "true"
+        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "true"
         self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "true"
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
         self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "10.0"))
@@ -62,6 +133,39 @@ class Config:
         self.ema_trend_lookback = int(os.getenv("EMA_TREND_LOOKBACK", "5"))
         self.ema_reversal_candles = int(os.getenv("EMA_REVERSAL_CANDLES", "2"))
         self.ema_pump_threshold = float(os.getenv("EMA_PUMP_THRESHOLD", "0.5"))
+
+        # ── Network tuning ──
+        # max_concurrency was previously hardcoded as asyncio.Semaphore(1)
+        # inside BinanceScanner — every HTTP request in the entire bot was
+        # serialized to one at a time regardless of how many proxies were
+        # available, which is the single biggest performance bottleneck in
+        # this file (see BinanceScanner.__init__). Now tunable, default
+        # chosen to roughly match the proxy pool's min_pool_size so there's
+        # normally a healthy proxy available for each in-flight request.
+        self.max_concurrency = int(os.getenv("MAX_CONCURRENCY", "15"))
+        self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "8"))
+        self.max_retries = int(os.getenv("MAX_RETRIES", "5"))
+
+        # ── Failed-symbol retry ──
+        # Mirrors RsiBot.py's retry mechanism: if a symbol's fetch still
+        # fails after exhausting max_retries proxy attempts, retry it in
+        # up to failed_symbol_retry_rounds more whole rounds (fresh
+        # Thompson Sampling draws) rather than dropping it from this scan
+        # cycle. Set to False (or rounds=0) to restore old single-pass
+        # behavior.
+        self.retry_failed_symbols = os.getenv("RETRY_FAILED_SYMBOLS", "True").lower() == "true"
+        self.failed_symbol_retry_rounds = int(os.getenv("FAILED_SYMBOL_RETRY_ROUNDS", "1"))
+
+        # ── Overall run watchdog ──
+        # Hard ceiling on total run() execution time, as a last line of
+        # defense against any hang (e.g. the swallowed-CancelledError class
+        # of bug fixed in RobustProxyPool below). See RsiBot.py's
+        # CONFIG.RUN_TIMEOUT_SECONDS for the full reasoning; the value here
+        # is a little higher since this bot does more per-symbol analytical
+        # work (multiple indicator calculations) across more timeframes.
+        self.run_timeout_seconds = float(os.getenv("RUN_TIMEOUT_SECONDS", "1500"))
+
+        self.calc_workers = int(os.getenv("CALC_WORKERS", "8"))
 
         self.validate()
 
@@ -86,7 +190,15 @@ def setup_logging() -> None:
 
 
 # =============================================================================
-# PROXY INFRASTRUCTURE  (exact original from your first file)
+# PROXY INFRASTRUCTURE
+# Ported from RsiBot.py's proxy pool: Thompson Sampling selection in place
+# of the old compute_score() point-estimate (see _select_thompson_sampling's
+# docstring), and every bare `except:` changed to `except Exception:` so a
+# cancellation of the background refresh task can never be silently
+# swallowed (see shutdown()'s docstring for the real incident this fixes).
+# This bot's own emergency_refresh()/_earliest_cooldown() helpers, used by
+# BinanceScanner._request, are preserved. Tuning defaults (pool size,
+# thresholds) are kept as this bot's own original values, not RsiBot's.
 # =============================================================================
 class ProxyState(Enum):
     ACTIVE = "active"
@@ -113,7 +225,7 @@ class ProxyStats:
     @property
     def success_rate(self) -> float:
         if self.total_uses == 0:
-            return 0.8
+            return 0.8  # Optimistic for new proxies
         return self.successes / self.total_uses
 
     @property
@@ -122,18 +234,25 @@ class ProxyStats:
             return 9999.0
         return self.total_latency_ms / self.successes
 
-    def compute_score(self) -> float:
-        if self.state != ProxyState.ACTIVE:
-            return 0.0
-        score = self.success_rate
-        score *= (0.5 ** self.consecutive_failures)
-        if self.avg_latency_ms < 9999:
-            latency_factor = max(0.1, 1.0 - (self.avg_latency_ms / 5000))
-            score *= (0.6 + 0.4 * latency_factor)
-        return max(0.001, min(1.0, score))
-
 
 class RobustProxyPool:
+    """
+    Async proxy pool with Thompson Sampling selection, a cooldown/ban
+    circuit breaker, and background health maintenance.
+
+    Selection (get_proxy -> _select_thompson_sampling): each proxy's
+    success rate is modeled as a Beta(1+successes, 1+failures) posterior;
+    one sample is drawn per active proxy and the highest draw wins. This
+    gives a principled, self-balancing explore/exploit tradeoff (a proxy
+    with little history has a wide posterior and gets tried again to
+    gather evidence; a proxy with a solid track record has a narrow
+    posterior and gets picked reliably) without a hand-tuned formula.
+    """
+
+    PROXY_SOURCES: List[str] = [
+        "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt"
+    ]
+
     def __init__(
         self,
         max_pool_size: int = 25,
@@ -143,7 +262,9 @@ class RobustProxyPool:
         ban_after_uses: int = 18,
         ban_below_rate: float = 0.25,
         validation_concurrency: int = 150,
-        refresh_interval: float = 180.0
+        background_refresh_interval: float = 180.0,
+        validation_timeout: float = 8.0,
+        shutdown_timeout_seconds: float = 15.0,
     ):
         self.max_pool_size = max_pool_size
         self.min_pool_size = min_pool_size
@@ -152,152 +273,263 @@ class RobustProxyPool:
         self.ban_after_uses = ban_after_uses
         self.ban_below_rate = ban_below_rate
         self.validation_concurrency = validation_concurrency
-        self.refresh_interval = refresh_interval
+        self.background_refresh_interval = background_refresh_interval
+        self.validation_timeout = validation_timeout
+        self.SHUTDOWN_TIMEOUT_SECONDS = shutdown_timeout_seconds
+
         self._proxies: Dict[str, ProxyStats] = {}
         self._lock = asyncio.Lock()
         self._session: Optional[aiohttp.ClientSession] = None
         self._refresh_task: Optional[asyncio.Task] = None
-        self._source_url: Optional[str] = None
+        self._custom_sources: List[str] = []
         self._last_populate_time: float = 0.0
         self._populate_lock = asyncio.Lock()
 
-    async def initialize(self, session: aiohttp.ClientSession, source_url: str):
-        self._session = session
-        self._source_url = source_url
-        await self._populate_pool()
-        self._refresh_task = asyncio.create_task(self._refresh_loop())
+    @property
+    def active_proxies(self) -> List[str]:
+        now = time.time()
+        active = []
+        for proxy, stats in self._proxies.items():
+            if stats.state == ProxyState.ACTIVE:
+                active.append(proxy)
+            elif stats.state == ProxyState.COOLING and now > stats.cooldown_until:
+                stats.state = ProxyState.ACTIVE
+                stats.consecutive_failures = 0
+                active.append(proxy)
+        return active
 
-    async def _refresh_loop(self):
-        while True:
-            await asyncio.sleep(self.refresh_interval)
-            await self._populate_pool()
-
-    async def _populate_pool(self):
-        async with self._populate_lock:
-            self._last_populate_time = time.time()
-            try:
-                async with self._session.get(self._source_url, timeout=10) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-                        raw = {line.strip() for line in text.splitlines() if line.strip() and '.' in line}
-                        new_proxies = {p if "://" in p else f"http://{p}" for p in raw}
-
-                        to_validate = list(new_proxies - set(self._proxies.keys()))
-                        if not to_validate:
-                            return
-
-                        sem = asyncio.Semaphore(self.validation_concurrency)
-
-                        async def validate(p):
-                            async with sem:
-                                start = time.time()
-                                try:
-                                    async with self._session.get(
-                                        "https://fapi.binance.com/fapi/v1/time",
-                                        proxy=p,
-                                        timeout=8
-                                    ) as r:
-                                        if r.status == 200:
-                                            return p, True, (time.time() - start) * 1000
-                                except:
-                                    pass
-                                return p, False, 0
-
-                        tasks = [validate(p) for p in to_validate]
-                        for coro in asyncio.as_completed(tasks):
-                            p, ok, lat = await coro
-                            if ok:
-                                async with self._lock:
-                                    active_count = len([
-                                        pr for pr, s in self._proxies.items()
-                                        if s.state == ProxyState.ACTIVE
-                                    ])
-                                    if active_count < self.max_pool_size:
-                                        self._proxies[p] = ProxyStats(
-                                            successes=1, total_latency_ms=lat
-                                        )
-            except Exception as e:
-                logging.error(f"Proxy refresh error: {e}")
+    @property
+    def pool_size(self) -> int:
+        return len(self.active_proxies)
 
     def _active_count(self) -> int:
-        return sum(1 for s in self._proxies.values() if s.state == ProxyState.ACTIVE)
+        return self.pool_size
 
     def _cooling_count(self) -> int:
         return sum(1 for s in self._proxies.values() if s.state == ProxyState.COOLING)
 
     def _earliest_cooldown(self) -> float:
         now = time.time()
-        times = [s.cooldown_until for s in self._proxies.values() if s.state == ProxyState.COOLING and s.cooldown_until > now]
+        times = [
+            s.cooldown_until for s in self._proxies.values()
+            if s.state == ProxyState.COOLING and s.cooldown_until > now
+        ]
         return min(times) if times else 0.0
 
+    async def initialize(self, session: aiohttp.ClientSession, source_url: str) -> bool:
+        self._session = session
+        self._custom_sources = [source_url] if source_url else []
+        await self._populate_pool()
+        self._refresh_task = asyncio.create_task(self._background_refresh_loop())
+        return self.pool_size > 0
+
     async def emergency_refresh(self):
+        """On-demand refresh, guarded so a burst of requests that all find
+        the pool empty at once don't each trigger their own refresh."""
         now = time.time()
         if now - self._last_populate_time < 10:
             return
-        logging.warning("Proxy pool low (%d active, %d cooling), emergency refresh...", self._active_count(), self._cooling_count())
+        logging.warning(
+            "Proxy pool low (%d active, %d cooling), emergency refresh...",
+            self._active_count(), self._cooling_count(),
+        )
         await self._populate_pool()
 
-    async def get_proxy(self) -> Optional[str]:
-        now = time.time()
+    async def _fetch_from_source(self, url: str) -> Set[str]:
+        proxies: Set[str] = set()
+        try:
+            async with self._session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    for line in text.splitlines():
+                        p = line.strip()
+                        if p and not p.startswith('#') and '.' in p:
+                            proxies.add(p if "://" in p else f"http://{p}")
+        except Exception as e:
+            logging.debug(f"Proxy source fetch failed ({url}): {e}")
+        return proxies
+
+    async def _populate_pool(self):
+        """Fetch and validate proxies from all configured sources."""
+        async with self._populate_lock:
+            self._last_populate_time = time.time()
+            all_sources = self.PROXY_SOURCES + self._custom_sources
+            if not all_sources:
+                return
+
+            fetched = await asyncio.gather(*[self._fetch_from_source(u) for u in all_sources])
+            raw: Set[str] = set().union(*fetched) if fetched else set()
+
+            to_validate = list(raw - set(self._proxies.keys()))
+            if not to_validate:
+                return
+
+            sem = asyncio.Semaphore(self.validation_concurrency)
+
+            async def validate(p: str) -> Tuple[str, bool, float]:
+                async with sem:
+                    start = time.time()
+                    try:
+                        timeout = aiohttp.ClientTimeout(total=self.validation_timeout)
+                        async with self._session.get(
+                            "https://fapi.binance.com/fapi/v1/time", proxy=p, timeout=timeout
+                        ) as r:
+                            if r.status == 200:
+                                data = await r.json()
+                                if "serverTime" in data:
+                                    return p, True, (time.time() - start) * 1000
+                    except Exception:
+                        # `except Exception`, deliberately not a bare `except:`.
+                        # asyncio.CancelledError is a BaseException (Python
+                        # 3.8+) specifically so catch-alls like this don't
+                        # swallow it. A bare except here was the actual root
+                        # cause of a real production incident (see RsiBot.py):
+                        # cancelling the background refresh task mid-validation
+                        # got silently absorbed, so the task's own `while True`
+                        # loop never saw the cancellation and ran forever.
+                        pass
+                    return p, False, 0.0
+
+            tasks = [asyncio.create_task(validate(p)) for p in to_validate]
+            added = 0
+            for coro in asyncio.as_completed(tasks):
+                try:
+                    p, ok, lat = await coro
+                except Exception:
+                    continue
+                if ok:
+                    async with self._lock:
+                        if p not in self._proxies and len(self.active_proxies) < self.max_pool_size:
+                            self._proxies[p] = ProxyStats(successes=1, total_latency_ms=lat, last_success=time.time())
+                            added += 1
+
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+
+            if added:
+                logging.info(f"✨ Added {added} new proxies (total active: {self.pool_size})")
+
+    async def _background_refresh_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(self.background_refresh_interval)
+                if self.pool_size < self.min_pool_size:
+                    logging.warning(f"⚠️ Pool critically low ({self.pool_size}), refreshing...")
+                    await self._populate_pool()
+                await self._prune_old_banned()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"Background refresh error: {e}")
+
+    async def _prune_old_banned(self):
         async with self._lock:
-            active = []
-            for p, s in self._proxies.items():
-                if s.state == ProxyState.COOLING and now > s.cooldown_until:
-                    s.state = ProxyState.ACTIVE
-                    s.consecutive_failures = 0
-                if s.state == ProxyState.ACTIVE:
-                    active.append((p, s.compute_score()))
+            cutoff = time.time() - 600
+            to_remove = [
+                p for p, s in self._proxies.items()
+                if s.state == ProxyState.BANNED and s.last_failure < cutoff
+            ]
+            for p in to_remove:
+                del self._proxies[p]
 
-            if not active:
-                return None
+    def _select_thompson_sampling(self) -> Optional[str]:
+        """Beta-Bernoulli Thompson Sampling over active proxies' success
+        history — see the class docstring, or RsiBot.py's identical
+        method for the full derivation."""
+        active = self.active_proxies
+        if not active:
+            return None
+        best_proxy: Optional[str] = None
+        best_sample = -1.0
+        for proxy in active:
+            stats = self._proxies[proxy]
+            alpha = 1.0 + stats.successes
+            beta_param = 1.0 + stats.failures
+            sample = random.betavariate(alpha, beta_param)
+            if sample > best_sample:
+                best_sample = sample
+                best_proxy = proxy
+        return best_proxy
 
-            total = sum(score for _, score in active)
-            r = random.random() * total
-            curr = 0
-            for p, score in active:
-                curr += score
-                if curr >= r:
-                    self._proxies[p].last_used = now
-                    return p
-            return active[-1][0]
+    async def get_proxy(self) -> Optional[str]:
+        proxy = self._select_thompson_sampling()
+        if proxy:
+            self._proxies[proxy].last_used = time.time()
+        return proxy
+
+    def _record_failure(self, proxy: str):
+        if proxy not in self._proxies:
+            return
+        s = self._proxies[proxy]
+        s.failures += 1
+        s.consecutive_failures += 1
+        s.last_failure = time.time()
+        if s.consecutive_failures >= self.max_consecutive_failures:
+            s.state = ProxyState.COOLING
+            s.cooldown_until = time.time() + self.cooldown_seconds
+        if s.total_uses >= self.ban_after_uses and s.success_rate < self.ban_below_rate:
+            s.state = ProxyState.BANNED
+            logging.warning(f"🚫 Banned {proxy} (rate: {s.success_rate:.0%})")
 
     async def report_success(self, proxy: str, latency: float):
         async with self._lock:
-            if proxy in self._proxies:
-                s = self._proxies[proxy]
-                s.successes += 1
-                s.consecutive_failures = 0
-                s.total_latency_ms += latency
-                s.last_success = time.time()
+            if proxy not in self._proxies:
+                return
+            s = self._proxies[proxy]
+            s.successes += 1
+            s.consecutive_failures = 0
+            s.total_latency_ms += latency
+            s.last_success = time.time()
+            if s.state == ProxyState.COOLING:
+                s.state = ProxyState.ACTIVE
 
     async def report_failure(self, proxy: str):
         async with self._lock:
-            if proxy in self._proxies:
-                s = self._proxies[proxy]
-                s.failures += 1
-                s.consecutive_failures += 1
-                s.last_failure = time.time()
-                if s.consecutive_failures >= self.max_consecutive_failures:
-                    s.state = ProxyState.COOLING
-                    s.cooldown_until = time.time() + self.cooldown_seconds
-                if s.total_uses >= self.ban_after_uses and s.success_rate < self.ban_below_rate:
-                    s.state = ProxyState.BANNED
+            self._record_failure(proxy)
 
     async def shutdown(self):
-        if self._refresh_task:
+        """
+        Gracefully stop the background refresh task, bounded by a timeout.
+
+        See RsiBot.py's RobustProxyPool.shutdown for the full incident this
+        guards against: a swallowed CancelledError once let a background
+        task keep running forever after being "cancelled", hanging the
+        whole process for hours with no error. The fix is the
+        `except Exception` (not bare `except:`) in _populate_pool/validate
+        above; this bounded wait is defense-in-depth in case a similar
+        mistake is ever reintroduced here or elsewhere.
+        """
+        if self._refresh_task and not self._refresh_task.done():
             self._refresh_task.cancel()
+            try:
+                await asyncio.wait_for(self._refresh_task, timeout=self.SHUTDOWN_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                logging.error(
+                    f"⚠️ Background refresh task did not stop within "
+                    f"{self.SHUTDOWN_TIMEOUT_SECONDS}s of being cancelled — abandoning it."
+                )
 
 # =============================================================================
 # BINANCE SCANNER
 # =============================================================================
 class BinanceScanner:
-    def __init__(self, session: aiohttp.ClientSession, proxy_pool: RobustProxyPool):
+    def __init__(self, session: aiohttp.ClientSession, proxy_pool: RobustProxyPool, cfg: "Config"):
         self.session = session
         self.proxies = proxy_pool
-        self.sem = asyncio.Semaphore(1)
+        self.cfg = cfg
+        # BUG FIX: this was asyncio.Semaphore(1) — every HTTP request in
+        # the entire bot was serialized to exactly one in flight at a time,
+        # regardless of how many proxies were available in the pool. That's
+        # the single biggest performance bottleneck in this file: with a
+        # 20-ish proxy pool, at most one of them was ever doing anything at
+        # once. Now tunable via CONFIG.max_concurrency (see Config).
+        self.sem = asyncio.Semaphore(cfg.max_concurrency)
 
     async def _request(self, url: str, params: dict = None) -> Any:
-        for attempt in range(5):
+        for attempt in range(self.cfg.max_retries):
             proxy = await self.proxies.get_proxy()
             if not proxy:
                 # Pool empty — try emergency refresh once, then wait for cooldowns
@@ -315,13 +547,19 @@ class BinanceScanner:
 
             start = time.time()
             try:
-                async with self.session.get(url, params=params, proxy=proxy, timeout=8) as resp:
-                    if resp.status == 200:
-                        await self.proxies.report_success(proxy, (time.time() - start) * 1000)
-                        return await resp.json()
-                    if resp.status == 429:
-                        await asyncio.sleep(2)
-            except:
+                async with self.sem:
+                    timeout = aiohttp.ClientTimeout(total=self.cfg.request_timeout)
+                    async with self.session.get(url, params=params, proxy=proxy, timeout=timeout) as resp:
+                        if resp.status == 200:
+                            await self.proxies.report_success(proxy, (time.time() - start) * 1000)
+                            return await resp.json()
+                        if resp.status == 429:
+                            await asyncio.sleep(2)
+            except Exception:
+                # `except Exception`, not bare `except:` — see
+                # RobustProxyPool.shutdown's docstring for why a bare
+                # except that can swallow asyncio.CancelledError is a real
+                # correctness hazard, not just a style nit.
                 pass
             await self.proxies.report_failure(proxy)
         return None
@@ -369,6 +607,12 @@ class BinanceScanner:
         data = await self._request(base, {"symbol": symbol, "interval": interval, "limit": limit})
         if not data:
             return None
+
+        is_valid, reason = validate_klines_payload(data, interval, limit)
+        if not is_valid:
+            logging.warning(f"⚠️ Rejected implausible klines for {symbol} {interval} ({market}): {reason}")
+            return None
+
         df = pd.DataFrame(
             data,
             columns=[
@@ -433,6 +677,16 @@ def _calc_enhanced_ema_analysis(
     pump_threshold: float,
 ) -> Optional[Dict[str, Any]]:
     df = df.copy()
+    # Single, consistent EMA basis for this whole function. Previously
+    # EMA34 was computed independently up to three times in this call
+    # graph — once here, once (with a DIFFERENT convention, adjust=True
+    # by default) inside _calc_multiple_ema_signals, and once more inside
+    # _detect_ema_direction_change — meaning the reported distance and the
+    # "ema_alignment"/"above_all_emas" flags used in the SAME breakout
+    # score weren't actually evaluated against the same EMA34 value. Now
+    # computed once, adjust=False everywhere, and passed down.
+    df["EMA13"] = df["close"].ewm(span=13, adjust=False).mean()
+    df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
     df["EMA34"] = df["close"].ewm(span=34, adjust=False).mean()
     df["pct_distance"] = (df["close"] - df["EMA34"]) / df["EMA34"] * 100
     recent_data = df.tail(lookback_period)
@@ -456,7 +710,7 @@ def _calc_enhanced_ema_analysis(
     ema_signals = _calc_multiple_ema_signals(df)
     consolidation_data = _detect_consolidation(df, lookback_period)
     direction_change_data = _detect_ema_direction_change(
-        df, 34, trend_lookback, reversal_candles, pump_threshold
+        df, trend_lookback, reversal_candles, pump_threshold
     )
 
     breakout_score = (
@@ -498,10 +752,12 @@ def _calc_enhanced_ema_analysis(
 
 
 def _calc_macd(df: pd.DataFrame) -> Dict[str, Any]:
-    ema12 = df["close"].ewm(span=12).mean()
-    ema26 = df["close"].ewm(span=26).mean()
+    # adjust=False for consistency with every other EMA in this file (the
+    # classic recursive EMA formula most trading platforms use for MACD).
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
-    signal = macd.ewm(span=9).mean()
+    signal = macd.ewm(span=9, adjust=False).mean()
     return {
         "macd": macd.iloc[-1],
         "signal": signal.iloc[-1],
@@ -510,16 +766,16 @@ def _calc_macd(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _calc_relative_volume(df: pd.DataFrame, lookback: int = 20) -> Dict[str, Any]:
-    recent_vol = df["volume"].astype(float).tail(lookback).mean()
-    longer_vol = df["volume"].astype(float).tail(lookback * 3).mean()
+    recent_vol = df["volume"].tail(lookback).mean()
+    longer_vol = df["volume"].tail(lookback * 3).mean()
     rel_vol = recent_vol / longer_vol if longer_vol > 0 else 1.0
     return {"relative_volume": rel_vol, "volume_surge": rel_vol > 1.5}
 
 
 def _calc_multiple_ema_signals(df: pd.DataFrame) -> Dict[str, Any]:
-    df["EMA13"] = df["close"].ewm(span=13).mean()
-    df["EMA21"] = df["close"].ewm(span=21).mean()
-    df["EMA34"] = df["close"].ewm(span=34).mean()
+    """Reads the EMA13/21/34 columns _calc_enhanced_ema_analysis already
+    computed instead of recomputing them (previously with a different,
+    inconsistent `adjust` convention — see that function's docstring)."""
     last = df.iloc[-1]
     return {
         "ema_alignment": last["EMA13"] > last["EMA21"] > last["EMA34"],
@@ -537,13 +793,14 @@ def _detect_consolidation(df: pd.DataFrame, lookback: int = 20) -> Dict[str, Any
 
 def _detect_ema_direction_change(
     df: pd.DataFrame,
-    ema_period: int = 34,
     lookback_trend: int = 5,
     reversal_candles: int = 2,
     pump_threshold: float = 0.5,
 ) -> Dict[str, Any]:
-    df = df.copy()
-    df["EMA34"] = df["close"].ewm(span=ema_period, adjust=False).mean()
+    """Reads the EMA34 column _calc_enhanced_ema_analysis already computed
+    instead of recomputing it on a fresh copy (previously a third,
+    redundant — if numerically identical, adjust=False — computation)."""
+    df = df[["EMA34"]].copy()
     df["ema_pct_change"] = df["EMA34"].pct_change() * 100
     recent_data = df.tail(lookback_trend + reversal_candles)
 
@@ -634,16 +891,62 @@ class Reporter:
         return re.sub(r"([_**\[\]()~`>#+\-=|{}.!])", r"\\\1", str(t))
 
     async def send(self, msg: str):
+        """
+        Send msg to chat_id and channel (whichever are configured).
+
+        BUG FIX: previously, on HTTP 429, this waited out Retry-After and
+        then did nothing — the message was never actually resent, so a
+        rate-limited alert was just silently lost. Now retries the send
+        itself (bounded), and any failure that isn't recovered gets logged
+        instead of vanishing into a bare `except: pass`.
+        """
         for target in [self.chat_id, self.channel]:
             if not target:
                 continue
-            try:
-                payload = {"chat_id": target, "text": msg, "parse_mode": "MarkdownV2"}
-                async with self.session.post(self.url, json=payload) as r:
-                    if r.status == 429:
-                        await asyncio.sleep(int(r.headers.get("Retry-After", 5)))
-            except:
-                pass
+            payload = {"chat_id": target, "text": msg, "parse_mode": "MarkdownV2"}
+            for attempt in range(3):
+                try:
+                    async with self.session.post(self.url, json=payload) as r:
+                        if r.status == 200:
+                            break
+                        if r.status == 429:
+                            retry_after = int(r.headers.get("Retry-After", 5))
+                            logging.warning("Telegram rate limit, waiting %ds then resending...", retry_after)
+                            await asyncio.sleep(retry_after)
+                            continue
+                        body = await r.text()
+                        logging.error("Telegram send failed (HTTP %d) for %s: %s", r.status, target, body[:300])
+                        break
+                except Exception as e:
+                    logging.error("Telegram send exception for %s: %s", target, e)
+                    await asyncio.sleep(1)
+            else:
+                logging.error("Failed to deliver Telegram message to %s after 3 attempts", target)
+
+    async def send_parts(self, parts: List[str], delay: float = 0.5):
+        """
+        Send each string in `parts` as its own Telegram message.
+
+        BUG FIX: callers used to join multiple sections (e.g. an "Above"
+        section with up to 60 rows plus a "Below" section with up to 30)
+        into ONE message with "\\n\\n".join(parts) before sending. Telegram
+        rejects messages over 4096 characters; a combined message that
+        size is a real, not theoretical, risk here, and send() had no
+        handling for a non-200/429 response beyond logging it — the
+        message would just never arrive with no obvious cause otherwise.
+        Sending each section as its own message keeps every message
+        comfortably under the limit without generic mid-section chunking.
+        """
+        for part in parts:
+            if not part:
+                continue
+            if len(part) > 4000:
+                logging.warning(
+                    "A report section is %d chars, close to/over Telegram's "
+                    "4096 limit — it may be rejected.", len(part)
+                )
+            await self.send(part)
+            await asyncio.sleep(delay)
 
     def format_section(self, timeframe: str, position: str, df: pd.DataFrame) -> str:
         header = f"*{self.esc(timeframe)} • {self.esc(position)} Line*"
@@ -760,22 +1063,19 @@ def _signal_handler(sig: int) -> None:
     _shutdown_event.set()
     
 
-async def run() -> None:
-    setup_logging()
-    cfg = Config()
-
+async def run(cfg: "Config") -> None:
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0)) as session:
         proxies = RobustProxyPool()
         await proxies.initialize(session, cfg.proxy_list_url)
 
-        scanner = BinanceScanner(session, proxies)
+        scanner = BinanceScanner(session, proxies, cfg)
         reporter = Reporter(
             cfg.telegram_bot_token,
             cfg.telegram_chat_id,
             cfg.telegram_channel_username,
             session,
         )
-        engine = CalculationEngine(max_workers=8)
+        engine = CalculationEngine(max_workers=cfg.calc_workers)
 
         perps, spots = await scanner.get_all_symbols()
         all_syms = sorted(list((perps | spots) - IGNORED_SYMBOLS))
@@ -795,19 +1095,27 @@ async def run() -> None:
             enhanced_results: List[Dict[str, Any]] = []
             traditional_results: List[Dict[str, Any]] = []
 
-            async def _process_symbol(sym: str) -> None:
+            async def _process_symbol(sym: str) -> bool:
+                """
+                Fetch + analyze one symbol on this timeframe. Returns
+                whether the FETCH succeeded (used by the retry loop below)
+                — not whether any particular analysis matched, since
+                traditional_results/enhanced_results/ohlc_accumulator are
+                populated as a side effect regardless.
+                """
                 if _shutdown_event.is_set():
-                    return
+                    return True  # not a fetch failure — don't retry a deliberate stop
                 market = "perp" if sym in perps else "spot"
                 try:
                     df = await scanner.fetch_ohlcv(sym, tf, market, 200)
                     if df is None or df.empty:
-                        return
+                        return False
                 except Exception as e:
                     logging.debug("Fetch failed for %s %s: %s", sym, tf, e)
-                    return
+                    return False
 
-                # Traditional EMA distance (unfiltered)
+                # Traditional EMA distance (unfiltered) — computed for
+                # every timeframe, this is cheap.
                 try:
                     simple = await engine.simple_ema(df)
                     if simple:
@@ -816,21 +1124,30 @@ async def run() -> None:
                 except Exception as e:
                     logging.debug("Simple EMA calc failed for %s: %s", sym, e)
 
-                # Enhanced breakout analysis (filtered)
-                try:
-                    enhanced = await engine.enhanced_ema(df, cfg)
-                    if enhanced:
-                        enhanced["symbol"] = sym
-                        enhanced_results.append(enhanced)
-                except Exception as e:
-                    logging.debug("Enhanced EMA calc failed for %s: %s", sym, e)
+                # Enhanced breakout analysis — PERFORMANCE FIX: this used
+                # to run unconditionally on every timeframe (4h, 1d, AND
+                # 1w) even though ENHANCED_TIMEFRAMES = {"4h"} means only
+                # the 4h results were ever used; the 1d/1w computations
+                # (MACD, relative volume, multiple-EMA alignment,
+                # consolidation detection, direction-change detection —
+                # real pandas work, not free) were done and then simply
+                # discarded every single run. Now only computed where it's
+                # actually going to be reported.
+                if tf in ENHANCED_TIMEFRAMES:
+                    try:
+                        enhanced = await engine.enhanced_ema(df, cfg)
+                        if enhanced:
+                            enhanced["symbol"] = sym
+                            enhanced_results.append(enhanced)
+                    except Exception as e:
+                        logging.debug("Enhanced EMA calc failed for %s: %s", sym, e)
 
                 # OHLC projections — reuse the same df for 1d/1w
                 if tf in ("1d", "1w"):
                     try:
                         projections = await engine.ohlc(df, cfg.ohlc_lookback)
                         if not projections:
-                            return
+                            return True
                         close = projections["current_close"]
                         levels = []
                         if cfg.show_d_plus:
@@ -858,12 +1175,57 @@ async def run() -> None:
                     except Exception as e:
                         logging.debug("OHLC calc failed for %s %s: %s", sym, tf, e)
 
-            tasks = [asyncio.create_task(_process_symbol(s)) for s in all_syms]
-            for coro in tqdm.as_completed(tasks, desc=f"Scanning {tf}", total=len(tasks)):
+                return True
+
+            # ── Failed-symbol retry ──
+            # Mirrors RsiBot.py: a symbol whose fetch fails after
+            # BinanceScanner._request's own cfg.max_retries proxy attempts
+            # gets cfg.failed_symbol_retry_rounds more whole rounds against
+            # freshly-drawn proxies (Thompson Sampling naturally biases
+            # away from whatever just failed) instead of being dropped
+            # from this scan cycle. cfg.retry_failed_symbols=False (or
+            # rounds=0) reproduces the old single-pass behavior exactly.
+            async def _process_symbol_tracked(sym: str) -> Tuple[str, bool]:
+                # asyncio.as_completed (which tqdm.as_completed wraps)
+                # yields completed awaitables in completion order, not in
+                # a way that identifies which input they correspond to —
+                # so the symbol has to travel with its own result instead
+                # of being recovered afterward from task bookkeeping.
                 try:
-                    await coro
-                except Exception:
-                    pass
+                    ok = await _process_symbol(sym)
+                except Exception as e:
+                    logging.debug("Unexpected error processing %s: %s", sym, e)
+                    ok = False
+                return sym, ok
+
+            pending_syms = list(all_syms)
+            first_round_failed = 0
+            max_rounds = 1 + (cfg.failed_symbol_retry_rounds if cfg.retry_failed_symbols else 0)
+
+            for round_num in range(1, max_rounds + 1):
+                if not pending_syms or _shutdown_event.is_set():
+                    break
+
+                desc = f"Scanning {tf}" if round_num == 1 else f"Retrying {tf} (round {round_num - 1}/{max_rounds - 1})"
+                tasks = [asyncio.create_task(_process_symbol_tracked(s)) for s in pending_syms]
+                results: Dict[str, bool] = {}
+                for coro in tqdm.as_completed(tasks, desc=desc, total=len(tasks)):
+                    sym, ok = await coro
+                    results[sym] = ok
+
+                still_failed = [s for s in pending_syms if not results.get(s, False)]
+                if round_num == 1:
+                    first_round_failed = len(still_failed)
+                pending_syms = still_failed
+
+                if pending_syms and round_num < max_rounds:
+                    logging.info(f"🔁 [{tf}] {len(pending_syms)} symbol(s) failed to fetch, retrying...")
+
+            recovered = first_round_failed - len(pending_syms)
+            if recovered > 0:
+                logging.info(f"✅ [{tf}] Recovered {recovered} symbol(s) via retry")
+            if pending_syms:
+                logging.warning(f"⚠️ [{tf}] {len(pending_syms)} symbol(s) failed to fetch after all retry rounds")
 
             logging.info(
                 "%s complete | Traditional: %d | Enhanced: %d",
@@ -881,7 +1243,7 @@ async def run() -> None:
                     parts.append(reporter.format_section(tf, "Below", below))
                 if parts:
                     try:
-                        await reporter.send("\n\n".join(parts))
+                        await reporter.send_parts(parts)
                         logging.info("Sent traditional EMA report for %s", tf)
                     except Exception as e:
                         logging.error("Failed to send traditional report: %s", e)
@@ -928,11 +1290,21 @@ async def run() -> None:
         
 
 async def main() -> None:
+    setup_logging()
+    cfg = Config()
+
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: _signal_handler(s))
     try:
-        await run()
+        await asyncio.wait_for(run(cfg), timeout=cfg.run_timeout_seconds)
+    except asyncio.TimeoutError:
+        logging.error(
+            "⛔ Run exceeded the %.0fs watchdog timeout and was force-cancelled. "
+            "This should not happen under normal conditions — treat it as a bug.",
+            cfg.run_timeout_seconds,
+        )
+        sys.exit(1)
     except Exception as e:
         logging.critical("Fatal error in main: %s", e, exc_info=True)
         sys.exit(1)
