@@ -255,7 +255,7 @@ class RobustProxyPool:
 
     def __init__(
         self,
-        max_pool_size: int = 25,
+        max_pool_size: int = 20,
         min_pool_size: int = 15,
         max_consecutive_failures: int = 3,
         cooldown_seconds: float = 90.0,
