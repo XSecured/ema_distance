@@ -120,8 +120,8 @@ class Config:
         # "Below" pairing of D+/M- and D-/M+) never fired by default. All
         # four now consistently default to True via the same comparison.
         self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "true"
-        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "true"
-        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "true"
+        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "false"
+        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "false"
         self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "true"
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
         self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "10.0"))
@@ -250,7 +250,7 @@ class RobustProxyPool:
     """
 
     PROXY_SOURCES: List[str] = [
-        "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt"
+        "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/refs/heads/main/https.txt"
     ]
 
     def __init__(
