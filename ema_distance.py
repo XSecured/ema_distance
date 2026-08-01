@@ -16,11 +16,34 @@ import numpy as np
 import pandas as pd
 from tqdm.asyncio import tqdm
 
+import warnings
+
 try:
     import uvloop
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
-    pass
+    uvloop = None
+
+# `asyncio.set_event_loop_policy()` and the whole policy system are
+# deprecated as of Python 3.14, slated for removal in 3.16 (the warning
+# you're seeing). The replacement is `loop_factory=` on asyncio.run() /
+# asyncio.Runner, applied where main() actually starts — see the bottom of
+# this file. uvloop is only imported here (not activated) so that failure
+# to import it can't crash the whole module at import time.
+
+# The OTHER deprecation warning in your logs — 'asyncio.iscoroutinefunction'
+# at the run_in_executor/add_signal_handler call sites — is NOT something
+# we call. It's emitted from inside uvloop's own C-level implementation of
+# run_in_executor (confirmed: MagicStack/uvloop#731, open upstream as of
+# this writing), which still uses the now-deprecated asyncio function
+# internally. There's nothing to fix in this file for that one; it'll go
+# away once uvloop migrates to inspect.iscoroutinefunction() on their end.
+# Suppressed narrowly here (by exact message, not a blanket filter) so it
+# doesn't clutter the logs in the meantime.
+warnings.filterwarnings(
+    "ignore",
+    message=r"'asyncio\.iscoroutinefunction' is deprecated",
+    category=DeprecationWarning,
+)
 
 
 # =============================================================================
@@ -89,13 +112,19 @@ def validate_klines_payload(
             f"(tolerance {tolerance_seconds}s for {interval})"
         )
 
-    for row in raw:
-        try:
-            close = float(row[4])
-        except (IndexError, TypeError, ValueError):
-            return False, "malformed close price in payload"
-        if not np.isfinite(close) or close <= 0:
-            return False, f"non-finite or non-positive close price ({close})"
+    # Vectorized rather than a per-row Python loop: this runs synchronously
+    # on the event loop (not offloaded to the thread pool) for every single
+    # fetch, so a tight Python for-loop over up to ~200 rows here adds up
+    # across hundreds of symbols. One numpy conversion + one vectorized
+    # check does the same job with far less per-call overhead.
+    try:
+        closes = np.array([row[4] for row in raw], dtype=float)
+    except (IndexError, TypeError, ValueError):
+        return False, "malformed close price in payload"
+    bad = ~np.isfinite(closes) | (closes <= 0)
+    if bad.any():
+        bad_idx = int(np.argmax(bad))
+        return False, f"non-finite or non-positive close price ({closes[bad_idx]})"
 
     return True, ""
 
@@ -112,16 +141,16 @@ class Config:
 
         # BUG FIX: show_d_minus and show_m_plus previously compared the env
         # value against "false" instead of "true", while show_d_plus and
-        # show_m_minus (correctly) compared against "true". With no env
-        # vars set — the default case — that meant show_d_minus and
-        # show_m_plus silently evaluated to False instead of True: D- and
-        # M+ (half of the four OHLC projection levels the bot is designed
-        # to report symmetrically, per format_ohlc_section's "Above"/
-        # "Below" pairing of D+/M- and D-/M+) never fired by default. All
-        # four now consistently default to True via the same comparison.
+        # show_m_minus (correctly) compared against "true". The comparison
+        # itself is now consistent for all four (always `== "true"`); which
+        # ones are enabled by default is controlled by the default string
+        # passed to os.getenv, not by which side of the comparison it's on.
+        # Currently: D+ and M- on by default (both "above open" levels —
+        # see format_ohlc_section's grouping), D- and M+ off. Override any
+        # of the four independently via their SHOW_* env var regardless.
         self.show_d_plus = os.getenv("SHOW_D_PLUS", "True").lower() == "true"
-        self.show_d_minus = os.getenv("SHOW_D_MINUS", "True").lower() == "false"
-        self.show_m_plus = os.getenv("SHOW_M_PLUS", "True").lower() == "false"
+        self.show_d_minus = os.getenv("SHOW_D_MINUS", "False").lower() == "true"
+        self.show_m_plus = os.getenv("SHOW_M_PLUS", "False").lower() == "true"
         self.show_m_minus = os.getenv("SHOW_M_MINUS", "True").lower() == "true"
         self.ohlc_lookback = int(os.getenv("OHLC_LOOKBACK", "60"))
         self.ohlc_alert_threshold = float(os.getenv("OHLC_ALERT_THRESHOLD", "10.0"))
@@ -135,14 +164,21 @@ class Config:
         self.ema_pump_threshold = float(os.getenv("EMA_PUMP_THRESHOLD", "0.5"))
 
         # ── Network tuning ──
-        # max_concurrency was previously hardcoded as asyncio.Semaphore(1)
-        # inside BinanceScanner — every HTTP request in the entire bot was
-        # serialized to one at a time regardless of how many proxies were
-        # available, which is the single biggest performance bottleneck in
-        # this file (see BinanceScanner.__init__). Now tunable, default
-        # chosen to roughly match the proxy pool's min_pool_size so there's
-        # normally a healthy proxy available for each in-flight request.
-        self.max_concurrency = int(os.getenv("MAX_CONCURRENCY", "25"))
+        # CORRECTION: an earlier pass here claimed asyncio.Semaphore(1) in
+        # BinanceScanner was serializing every request. That was wrong —
+        # the semaphore was declared but never actually applied anywhere
+        # (no `async with self.sem:` existed), so it was dead code with
+        # zero effect. The bot's real original concurrency was effectively
+        # UNBOUNDED: aiohttp.TCPConnector(limit=0) plus no cap of any kind,
+        # limited only by how many proxies/OS sockets could be juggled at
+        # once. Actually wiring the semaphore up (which a later change
+        # did) introduced a real cap that didn't exist before — at 15, a
+        # genuine regression from "unbounded" for a 600+ symbol scan. This
+        # default is now set much higher so it acts as a sane ceiling
+        # (protects against a genuine connection storm) without being the
+        # bottleneck for a scan this size. Tune via MAX_CONCURRENCY if
+        # your proxy pool size or symbol count differs a lot from this.
+        self.max_concurrency = int(os.getenv("MAX_CONCURRENCY", "100"))
         self.request_timeout = float(os.getenv("REQUEST_TIMEOUT", "8"))
         self.max_retries = int(os.getenv("MAX_RETRIES", "5"))
 
@@ -249,13 +285,15 @@ class RobustProxyPool:
     posterior and gets picked reliably) without a hand-tuned formula.
     """
 
-    PROXY_SOURCES: List[str] = [
-        "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/refs/heads/main/https.txt"
-    ]
+    # No hardcoded fallback source — proxies come exclusively from
+    # cfg.proxy_list_url (set PROXY_LIST_URL to
+    # https://raw.githubusercontent.com/hproxy-com/free-proxy-list/refs/heads/main/https.txt
+    # in your repo secrets/workflow env).
+    PROXY_SOURCES: List[str] = []
 
     def __init__(
         self,
-        max_pool_size: int = 20,
+        max_pool_size: int = 25,
         min_pool_size: int = 15,
         max_consecutive_failures: int = 3,
         cooldown_seconds: float = 90.0,
@@ -520,12 +558,13 @@ class BinanceScanner:
         self.session = session
         self.proxies = proxy_pool
         self.cfg = cfg
-        # BUG FIX: this was asyncio.Semaphore(1) — every HTTP request in
-        # the entire bot was serialized to exactly one in flight at a time,
-        # regardless of how many proxies were available in the pool. That's
-        # the single biggest performance bottleneck in this file: with a
-        # 20-ish proxy pool, at most one of them was ever doing anything at
-        # once. Now tunable via CONFIG.max_concurrency (see Config).
+        # CORRECTION: the original asyncio.Semaphore(1) here was declared
+        # but never actually applied anywhere in _request — dead code with
+        # no real effect, so the bot's true original concurrency was
+        # unbounded (see CONFIG.max_concurrency's comment for the full
+        # story). This semaphore is a new, real cap (tunable via
+        # CONFIG.max_concurrency, defaulted high) — a sane ceiling against
+        # a genuine connection storm, not a performance fix in itself.
         self.sem = asyncio.Semaphore(cfg.max_concurrency)
 
     async def _request(self, url: str, params: dict = None) -> Any:
@@ -1311,4 +1350,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # loop_factory replaces the deprecated set_event_loop_policy() pattern
+    # (see the comment near the uvloop import at the top of this file).
+    asyncio.run(main(), loop_factory=uvloop.new_event_loop if uvloop else None)
